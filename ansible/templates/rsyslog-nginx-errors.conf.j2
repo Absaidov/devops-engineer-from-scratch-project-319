@@ -1,0 +1,26 @@
+# Managed by Ansible. Local changes will be overwritten.
+template(name="NginxErrorJson" type="list") {
+    constant(value="{\"timestamp\":\"")
+    property(name="timereported" dateFormat="rfc3339" format="json")
+    constant(value="\",\"host\":\"")
+    property(name="hostname" format="json")
+    constant(value="\",\"severity\":\"")
+    property(name="syslogseverity-text" format="json")
+    constant(value="\",\"program\":\"")
+    property(name="programname" format="json")
+    constant(value="\",\"message\":\"")
+    property(name="msg" format="json" dropLastLf="on")
+    constant(value="\"}\n")
+}
+
+if ($programname == "nginx_error") then {
+    action(
+        type="omfile"
+        file="{{ nginx_json_error_log_path }}"
+        template="NginxErrorJson"
+        fileOwner="syslog"
+        fileGroup="adm"
+        fileCreateMode="0640"
+    )
+    stop
+}

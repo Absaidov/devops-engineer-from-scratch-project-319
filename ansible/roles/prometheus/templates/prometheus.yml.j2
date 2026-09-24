@@ -1,0 +1,26 @@
+---
+global:
+  scrape_interval: {{ prometheus_scrape_interval | to_json }}
+  evaluation_interval: {{ prometheus_evaluation_interval | to_json }}
+
+rule_files:
+  - "/etc/prometheus/rules/{{ prometheus_rules_filename }}"
+
+scrape_configs:
+{% for job in prometheus_scrape_jobs %}
+  - job_name: {{ job.job_name | to_json }}
+    scheme: {{ job.scheme | default('http') | to_json }}
+    metrics_path: {{ job.metrics_path | default('/metrics') | to_json }}
+{% if job.basic_auth | default(false) %}
+    basic_auth:
+      username: {{ monitoring_basic_auth_username | to_json }}
+      password_file: {{ prometheus_application_password_path | to_json }}
+{% endif %}
+    static_configs:
+      - targets:
+{% for target in job.targets %}
+          - {{ target | trim | to_json }}
+{% endfor %}
+        labels:
+          environment: production
+{% endfor %}

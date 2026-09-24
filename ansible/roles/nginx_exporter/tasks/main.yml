@@ -1,0 +1,96 @@
+---
+- name: Validate Nginx Prometheus Exporter configuration
+  ansible.builtin.assert:
+    that:
+      - >-
+        nginx_exporter_image is match(
+        '^nginx/nginx-prometheus-exporter:[0-9]+\.[0-9]+\.[0-9]+$')
+      - nginx_exporter_scrape_uri | trim | length > 0
+      - nginx_exporter_listen_address | trim | length > 0
+      - nginx_exporter_port | int > 0
+      - nginx_exporter_port | int <= 65535
+      - nginx_exporter_port | int != monitoring_proxy_port | int
+      - nginx_exporter_port | int != node_exporter_port | int
+      - nginx_stub_status_path is match('^/[A-Za-z0-9/_-]+$')
+      - monitoring_allowed_cidrs is sequence
+      - monitoring_allowed_cidrs is not string
+      - monitoring_allowed_cidrs | length > 0
+      - "'0.0.0.0/0' not in monitoring_allowed_cidrs"
+      - "'::/0' not in monitoring_allowed_cidrs"
+    fail_msg: >-
+      Configure a pinned Nginx Exporter image, a valid unique port and only
+      trusted private monitoring-server CIDRs.
+
+- name: Allow Nginx Exporter from monitoring servers
+  community.general.ufw:
+    rule: allow
+    direction: in
+    proto: tcp
+    port: "{{ nginx_exporter_port | string }}"
+    from_ip: "{{ item }}"
+    comment: Prometheus Nginx Exporter
+  loop: "{{ monitoring_allowed_cidrs }}"
+
+- name: Start Nginx Prometheus Exporter
+  community.docker.docker_container:
+    name: "{{ nginx_exporter_container_name }}"
+    image: "{{ nginx_exporter_image }}"
+    state: started
+    pull: missing
+    detach: true
+    network_mode: host
+    restart_policy: "{{ nginx_exporter_restart_policy }}"
+    command:
+      - "--nginx.scrape-uri={{ nginx_exporter_scrape_uri }}"
+      - >-
+        --web.listen-address={{ nginx_exporter_listen_address }}:{{ nginx_exporter_port }}
+    log_driver: json-file
+    log_options:
+      max-size: 10m
+      max-file: "3"
+
+- name: Read Nginx stub status locally
+  ansible.builtin.uri:
+    url: "{{ nginx_exporter_scrape_uri }}"
+    method: GET
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: nginx_exporter_stub_status
+  changed_when: false
+
+- name: Verify Nginx stub status counters
+  ansible.builtin.assert:
+    that:
+      - "'Active connections:' in nginx_exporter_stub_status.content"
+      - "'Reading:' in nginx_exporter_stub_status.content"
+      - "'Writing:' in nginx_exporter_stub_status.content"
+      - "'Waiting:' in nginx_exporter_stub_status.content"
+    fail_msg: Nginx stub_status does not expose the expected counters.
+
+- name: Read Nginx Exporter metrics locally
+  ansible.builtin.uri:
+    url: >-
+      http://{{ nginx_exporter_check_address }}:{{ nginx_exporter_port }}/metrics
+    method: GET
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: nginx_exporter_metrics
+  until:
+    - (nginx_exporter_metrics.status | default(0)) == 200
+    - "'nginx_up 1' in (nginx_exporter_metrics.content | default(''))"
+  retries: 10
+  delay: 2
+  changed_when: false
+
+- name: Verify required Nginx metrics
+  ansible.builtin.assert:
+    that:
+      - "'nginx_up 1' in nginx_exporter_metrics.content"
+      - "'nginx_connections_active' in nginx_exporter_metrics.content"
+      - "'nginx_connections_reading' in nginx_exporter_metrics.content"
+      - "'nginx_connections_writing' in nginx_exporter_metrics.content"
+      - "'nginx_connections_waiting' in nginx_exporter_metrics.content"
+      - "'nginx_http_requests_total' in nginx_exporter_metrics.content"
+    fail_msg: Nginx Prometheus Exporter does not expose the required metrics.

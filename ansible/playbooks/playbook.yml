@@ -1,0 +1,87 @@
+---
+- name: Prepare application server
+  hosts: app
+  become: true
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose
+          - git
+          - curl
+          - dbus
+          - logrotate
+          - python3-passlib
+          - python3-requests
+          - rsyslog
+          - ufw
+        state: present
+        update_cache: true
+
+    - name: Start and enable Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add SSH user to docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    - name: Allow SSH
+      community.general.ufw:
+        rule: allow
+        port: "{{ deploy_ssh_port }}"
+        proto: tcp
+
+    - name: Allow HTTP and HTTPS
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - "{{ nginx_http_port }}"
+        - "{{ nginx_https_port }}"
+
+    - name: Deny incoming traffic by default
+      community.general.ufw:
+        direction: incoming
+        policy: deny
+
+    - name: Allow outgoing traffic by default
+      community.general.ufw:
+        direction: outgoing
+        policy: allow
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+
+    - name: Validate monitoring access ranges
+      ansible.builtin.assert:
+        that:
+          - monitoring_allowed_cidrs is sequence
+          - monitoring_allowed_cidrs is not string
+          - "'0.0.0.0/0' not in monitoring_allowed_cidrs"
+          - "'::/0' not in monitoring_allowed_cidrs"
+        fail_msg: >-
+          monitoring_allowed_cidrs must contain only trusted private CIDRs of
+          monitoring servers; public Internet ranges are forbidden.
+
+    - name: Allow the management proxy from monitoring servers
+      community.general.ufw:
+        rule: allow
+        direction: in
+        proto: tcp
+        port: "{{ monitoring_proxy_port | string }}"
+        from_ip: "{{ item }}"
+        comment: Prometheus application metrics
+      loop: "{{ monitoring_allowed_cidrs }}"
+
+    - name: Install and configure Node Exporter
+      ansible.builtin.include_role:
+        name: node_exporter

@@ -1,0 +1,15 @@
+---
+# Create ansible/group_vars/app/vault.yml with ansible-vault and put the real
+# authorized service-account key JSON into this variable.
+vault_yc_registry_key: |-
+  {
+    "id": "replace-with-key-id",
+    "service_account_id": "replace-with-service-account-id",
+    "private_key": "replace-with-private-key"
+  }
+
+# Encrypt the real values with ansible-vault before adding them to vault.yml.
+vault_db_username: replace-with-database-user
+vault_db_password: replace-with-database-password
+vault_s3_access_key: replace-with-s3-access-key-id
+vault_s3_secret_key: replace-with-s3-secret-key

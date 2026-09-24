@@ -1,0 +1,132 @@
+---
+server:
+  http_listen_address: 0.0.0.0
+  http_listen_port: {{ promtail_container_port }}
+  grpc_listen_port: 0
+  log_level: info
+
+positions:
+  filename: {{ promtail_positions_file | to_json }}
+  sync_period: 10s
+
+clients:
+  - url: {{ promtail_loki_push_url | to_json }}
+    backoff_config:
+      min_period: 500ms
+      max_period: 5m
+      max_retries: 20
+
+scrape_configs:
+  - job_name: application-container
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          __path__: >-
+            {{ promtail_application_log_dir }}/{{
+              promtail_application_container_id
+            }}-json.log
+          __tmp_observability_job: application
+          __tmp_observability_env: {{ promtail_environment | to_json }}
+          __tmp_observability_app: {{ deploy_container_name | to_json }}
+          __tmp_observability_host: {{ promtail_host_label | to_json }}
+    relabel_configs:
+      - source_labels: [__tmp_observability_job]
+        target_label: job
+      - source_labels: [__tmp_observability_env]
+        target_label: env
+      - source_labels: [__tmp_observability_app]
+        target_label: app
+      - source_labels: [__tmp_observability_host]
+        target_label: host
+    pipeline_stages:
+      - docker: {}
+      - json:
+          expressions:
+            level: level
+            logger_name: logger_name
+            user: user
+            username: username
+            request_id: request_id
+      - labels:
+          level:
+
+  - job_name: nginx-access
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          __path__: {{ nginx_json_access_log_path | to_json }}
+          __tmp_observability_job: nginx
+          __tmp_observability_env: {{ promtail_environment | to_json }}
+          __tmp_observability_app: nginx
+          __tmp_observability_host: {{ promtail_host_label | to_json }}
+          __tmp_observability_log_type: access
+      - targets:
+          - localhost
+        labels:
+          __path__: {{ nginx_management_access_log_path | to_json }}
+          __tmp_observability_job: nginx
+          __tmp_observability_env: {{ promtail_environment | to_json }}
+          __tmp_observability_app: nginx
+          __tmp_observability_host: {{ promtail_host_label | to_json }}
+          __tmp_observability_log_type: management
+    relabel_configs:
+      - source_labels: [__tmp_observability_job]
+        target_label: job
+      - source_labels: [__tmp_observability_env]
+        target_label: env
+      - source_labels: [__tmp_observability_app]
+        target_label: app
+      - source_labels: [__tmp_observability_host]
+        target_label: host
+      - source_labels: [__tmp_observability_log_type]
+        target_label: log_type
+    pipeline_stages:
+      - json:
+          expressions:
+            timestamp: timestamp
+            status: status
+            request_time: request_time
+            remote_user: remote_user
+            request: request
+            request_id: request_id
+      - timestamp:
+          source: timestamp
+          format: RFC3339
+          action_on_failure: fudge
+
+  - job_name: nginx-error
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          __path__: {{ nginx_json_error_log_path | to_json }}
+          __tmp_observability_job: nginx
+          __tmp_observability_env: {{ promtail_environment | to_json }}
+          __tmp_observability_app: nginx
+          __tmp_observability_host: {{ promtail_host_label | to_json }}
+          __tmp_observability_log_type: error
+    relabel_configs:
+      - source_labels: [__tmp_observability_job]
+        target_label: job
+      - source_labels: [__tmp_observability_env]
+        target_label: env
+      - source_labels: [__tmp_observability_app]
+        target_label: app
+      - source_labels: [__tmp_observability_host]
+        target_label: host
+      - source_labels: [__tmp_observability_log_type]
+        target_label: log_type
+    pipeline_stages:
+      - json:
+          expressions:
+            timestamp: timestamp
+            severity: severity
+            message: message
+      - timestamp:
+          source: timestamp
+          format: RFC3339
+          action_on_failure: fudge
+      - labels:
+          severity:

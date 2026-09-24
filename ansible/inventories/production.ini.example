@@ -1,0 +1,9 @@
+[app]
+app-server ansible_host=<app-public-ip> private_ip=<app-private-ip> ansible_user=ubuntu ansible_port=22
+
+[monitoring]
+monitoring-server ansible_host=<monitoring-public-ip> private_ip=<monitoring-private-ip> ansible_user=ubuntu ansible_port=22
+
+# ansible_host is used for SSH. Private IPs are used for Prometheus scrapes and
+# to generate the app-host allowlist for ports 9090, 9100 and 9113 and the
+# monitoring-host allowlist for Loki ingestion on port 3100.

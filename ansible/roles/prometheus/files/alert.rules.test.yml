@@ -1,0 +1,25 @@
+---
+rule_files:
+  - /etc/prometheus/rules/alert.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: TargetDown fires after two minutes
+    interval: 1m
+    input_series:
+      - series: 'up{job="test", instance="test:9090"}'
+        values: '0 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: test
+              instance: test:9090
+            exp_annotations:
+              summary: Prometheus target is unavailable
+              description: >-
+                Target test:9090 in job test has been unavailable for more
+                than 2 minutes.

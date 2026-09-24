@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration scan="true">
+    <springProperty scope="context" name="applicationName"
+                    source="spring.application.name" defaultValue="bulletins"/>
+    <springProperty scope="context" name="activeProfile"
+                    source="spring.profiles.active" defaultValue="dev"/>
+    <property name="hostname" value="${HOSTNAME:-local}"/>
+    <property name="logDir" value="/var/log/project-devops-deploy"/>
+
+    <appender name="JSON_STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+            <providers>
+                <timestamp><timeZone>UTC</timeZone></timestamp>
+                <pattern>
+                    <pattern>{"app":"${applicationName}","environment":"${activeProfile}","instance":"${hostname}"}</pattern>
+                </pattern>
+                <loggerName/>
+                <threadName/>
+                <logLevel/>
+                <message/>
+                <mdc/>
+                <arguments/>
+                <stackTrace/>
+            </providers>
+        </encoder>
+    </appender>
+
+    <appender name="JSON_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${logDir}/application.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${logDir}/application.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>10MB</maxFileSize>
+            <maxHistory>14</maxHistory>
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+            <providers>
+                <timestamp><timeZone>UTC</timeZone></timestamp>
+                <pattern>
+                    <pattern>{"app":"${applicationName}","environment":"${activeProfile}","instance":"${hostname}"}</pattern>
+                </pattern>
+                <loggerName/>
+                <threadName/>
+                <logLevel/>
+                <message/>
+                <mdc/>
+                <arguments/>
+                <stackTrace/>
+            </providers>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="JSON_STDOUT"/>
+        <appender-ref ref="JSON_FILE"/>
+    </root>
+</configuration>

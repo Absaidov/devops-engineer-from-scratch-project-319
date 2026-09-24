@@ -1,0 +1,21 @@
+cloud_id  = "b1gxxxxxxxxxxxxxxxxx"
+folder_id = "b1gxxxxxxxxxxxxxxxxx"
+
+# Determine your public address with: curl -4 ifconfig.me
+# Never leave 0.0.0.0/0 here.
+admin_cidrs = ["203.0.113.10/32"]
+
+zone         = "ru-central1-a"
+project_name = "project-319"
+environment  = "production"
+
+# Defaults create one worker (2 vCPU, 4 GiB RAM, 64 GiB network-hdd)
+# and one small Managed PostgreSQL host. Override only when necessary.
+node_count                    = 1
+postgresql_resource_preset_id = "b1.medium"
+
+# Optional. When omitted, Terraform generates a globally unique bucket name.
+# app_bucket_name = "project-319-bulletins-unique-name"
+
+# Enable only after you have tested destroy/recovery procedures.
+deletion_protection = false

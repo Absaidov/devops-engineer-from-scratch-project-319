@@ -1,0 +1,243 @@
+---
+- name: Deploy the application
+  hosts: app
+  become: true
+
+  tasks:
+    - name: Validate the management proxy configuration
+      ansible.builtin.assert:
+        that:
+          - monitoring_proxy_port | int > 0
+          - monitoring_proxy_port | int <= 65535
+          - deploy_management_backend_port | int > 0
+          - deploy_management_backend_port | int <= 65535
+          - >-
+            (monitoring_proxy_port | int)
+            != (deploy_management_backend_port | int)
+          - monitoring_basic_auth_username | trim | length > 0
+          - monitoring_allowed_cidrs is sequence
+          - monitoring_allowed_cidrs is not string
+          - "'0.0.0.0/0' not in monitoring_allowed_cidrs"
+          - "'::/0' not in monitoring_allowed_cidrs"
+        fail_msg: >-
+          Use different valid frontend/backend management ports, a non-empty
+          Basic Auth username, and only trusted private monitoring CIDRs.
+
+    - name: Ensure the monitoring proxy password is provided
+      ansible.builtin.assert:
+        that:
+          - vault_monitoring_basic_auth_password is defined
+          - vault_monitoring_basic_auth_password | trim | length > 0
+        fail_msg: >-
+          Define vault_monitoring_basic_auth_password in
+          ansible/group_vars/all/vault.yml using Ansible Vault.
+      no_log: true
+
+    - name: Deploy the application container
+      ansible.builtin.include_role:
+        name: deploy
+
+    - name: Create Nginx configuration and log directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - /etc/nginx
+        - /var/log/nginx
+
+    - name: Ensure the Nginx worker group exists
+      ansible.builtin.group:
+        name: www-data
+        system: true
+        state: present
+
+    - name: Create the JSON Nginx error log
+      ansible.builtin.file:
+        path: "{{ nginx_json_error_log_path }}"
+        state: touch
+        owner: syslog
+        group: adm
+        mode: "0640"
+        access_time: preserve
+        modification_time: preserve
+
+    - name: Configure rotation of the JSON Nginx error log
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/logrotate-nginx-error-json.j2"
+        dest: /etc/logrotate.d/nginx-error-json
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install monitoring endpoint credentials
+      community.general.htpasswd:
+        path: "{{ monitoring_basic_auth_file }}"
+        name: "{{ monitoring_basic_auth_username }}"
+        password: "{{ vault_monitoring_basic_auth_password }}"
+        hash_scheme: apr_md5_crypt
+        owner: root
+        group: www-data
+        mode: "0640"
+        state: present
+      no_log: true
+      diff: false
+
+    - name: Configure JSON formatting for Nginx error logs
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/rsyslog-nginx-errors.conf.j2"
+        dest: /etc/rsyslog.d/30-nginx-errors-json.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart rsyslog
+
+    - name: Validate the rsyslog configuration
+      ansible.builtin.command: rsyslogd -N1
+      changed_when: false
+
+    - name: Validate JSON Nginx error log rotation
+      ansible.builtin.command: >-
+        logrotate --debug /etc/logrotate.d/nginx-error-json
+      changed_when: false
+
+    - name: Apply the rsyslog configuration
+      ansible.builtin.meta: flush_handlers
+
+    - name: Check whether the TLS certificate already exists
+      ansible.builtin.stat:
+        path: "/etc/letsencrypt/live/{{ deploy_domain }}/fullchain.pem"
+      register: tls_certificate
+
+    - name: Configure Nginx for the initial certificate request
+      ansible.builtin.include_role:
+        name: geerlingguy.nginx
+      vars:
+        nginx_vhosts: "{{ nginx_application_vhosts }}"
+        nginx_tls_enabled: false
+      when: not tls_certificate.stat.exists
+
+    - name: Apply the initial Nginx configuration
+      ansible.builtin.meta: flush_handlers
+      when: not tls_certificate.stat.exists
+
+    - name: Install Certbot and obtain the TLS certificate
+      ansible.builtin.include_role:
+        name: geerlingguy.certbot
+
+    - name: Create the Certbot deploy hook directory
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal-hooks/deploy
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Reload Nginx after certificate renewal
+      ansible.builtin.copy:
+        dest: /etc/letsencrypt/renewal-hooks/deploy/reload-nginx
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          set -eu
+          nginx -t
+          systemctl reload nginx
+
+    - name: Configure Nginx with HTTPS
+      ansible.builtin.include_role:
+        name: geerlingguy.nginx
+      vars:
+        nginx_vhosts: "{{ nginx_application_vhosts }}"
+        nginx_tls_enabled: true
+
+    - name: Apply pending Nginx configuration changes
+      ansible.builtin.meta: flush_handlers
+
+    - name: Install and configure Nginx Prometheus Exporter
+      ansible.builtin.include_role:
+        name: nginx_exporter
+
+    - name: Install and configure Promtail
+      ansible.builtin.include_role:
+        name: promtail
+
+    - name: Verify the HTTP to HTTPS redirect
+      ansible.builtin.uri:
+        url: "http://{{ deploy_bind_address }}:{{ nginx_http_port }}/"
+        method: GET
+        headers:
+          Host: "{{ deploy_domain }}"
+        follow_redirects: none
+        status_code: 301
+        timeout: 5
+      changed_when: false
+
+    - name: Verify the HTTPS reverse proxy
+      ansible.builtin.uri:
+        url: "https://{{ deploy_bind_address }}:{{ nginx_https_port }}/"
+        method: GET
+        headers:
+          Host: "{{ deploy_domain }}"
+        validate_certs: false
+        status_code: 200
+        timeout: 5
+      changed_when: false
+
+    - name: Verify that the management proxy requires authentication
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ monitoring_proxy_port }}/actuator/prometheus
+        method: GET
+        status_code: 401
+        timeout: 5
+      changed_when: false
+
+    - name: Verify application metrics through the management proxy
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ monitoring_proxy_port }}/actuator/prometheus
+        method: GET
+        url_username: "{{ monitoring_basic_auth_username }}"
+        url_password: "{{ vault_monitoring_basic_auth_password }}"
+        force_basic_auth: true
+        status_code: 200
+        timeout: 5
+      changed_when: false
+      no_log: true
+
+    - name: Verify application health through the management proxy
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ monitoring_proxy_port }}/actuator/health/readiness
+        method: GET
+        url_username: "{{ monitoring_basic_auth_username }}"
+        url_password: "{{ vault_monitoring_basic_auth_password }}"
+        force_basic_auth: true
+        status_code: 200
+        timeout: 5
+      changed_when: false
+      no_log: true
+
+    - name: Verify that other Actuator endpoints are not proxied
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ monitoring_proxy_port }}/actuator/logfile
+        method: GET
+        url_username: "{{ monitoring_basic_auth_username }}"
+        url_password: "{{ vault_monitoring_basic_auth_password }}"
+        force_basic_auth: true
+        status_code: 404
+        timeout: 5
+      changed_when: false
+      no_log: true
+
+  handlers:
+    - name: Restart rsyslog
+      ansible.builtin.systemd_service:
+        name: rsyslog
+        state: restarted
+        enabled: true

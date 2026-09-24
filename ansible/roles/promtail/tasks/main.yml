@@ -1,0 +1,145 @@
+---
+- name: Validate Promtail configuration
+  ansible.builtin.assert:
+    that:
+      - groups.get('monitoring', []) | length > 0
+    fail_msg: Add a monitoring host to ansible/inventories/production.ini.
+
+- name: Validate the Promtail destination and labels
+  ansible.builtin.assert:
+    that:
+      - hostvars[groups['monitoring'][0]].private_ip is defined
+      - hostvars[groups['monitoring'][0]].private_ip | trim | length > 0
+      - promtail_image is match('^grafana/promtail:[0-9]+\.[0-9]+\.[0-9]+$')
+      - promtail_bind_address == '127.0.0.1'
+      - promtail_port | int > 0
+      - promtail_port | int <= 65535
+      - >-
+        promtail_loki_push_url
+        == 'http://' ~ hostvars[groups['monitoring'][0]].private_ip ~ ':'
+        ~ (hostvars[groups['monitoring'][0]].loki_port | string)
+        ~ '/loki/api/v1/push'
+      - promtail_environment | trim | length > 0
+      - promtail_host_label | trim | length > 0
+    fail_msg: >-
+      Give the monitoring host a private_ip, use a pinned Promtail image, keep
+      its local status endpoint on loopback, and send logs to private Loki
+      on the configured port.
+
+- name: Inspect the application container for Promtail
+  community.docker.docker_container_info:
+    name: "{{ deploy_container_name }}"
+  register: promtail_application_container
+
+- name: Validate the application logging driver
+  ansible.builtin.assert:
+    that:
+      - promtail_application_container.exists
+      - >-
+        promtail_application_container.container.Id
+        | default('') | length == 64
+      - >-
+        promtail_application_container.container.HostConfig.LogConfig.Type
+        | default('') == 'json-file'
+    fail_msg: >-
+      The application container must be running with Docker json-file logging
+      before Promtail is deployed.
+
+- name: Store the current application container log path
+  ansible.builtin.set_fact:
+    promtail_application_container_id: >-
+      {{ promtail_application_container.container.Id }}
+    promtail_application_log_dir: >-
+      /var/lib/docker/containers/{{ promtail_application_container.container.Id }}
+
+- name: Create Promtail configuration and positions directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ promtail_config_dir }}"
+      mode: "0755"
+    - path: "{{ promtail_positions_dir }}"
+      mode: "0750"
+
+- name: Render the Promtail configuration
+  ansible.builtin.template:
+    src: promtail.yml.j2
+    dest: "{{ promtail_config_path }}"
+    owner: root
+    group: root
+    mode: "0640"
+  register: promtail_config_result
+
+- name: Pull the pinned Promtail image if it is missing
+  community.docker.docker_image_pull:
+    name: "{{ promtail_image }}"
+    pull: not_present
+  register: promtail_image_pull_result
+  until: promtail_image_pull_result is succeeded
+  retries: 5
+  delay: 10
+
+- name: Validate the rendered Promtail configuration
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --user
+      - 0:0
+      - --volume
+      - "{{ promtail_config_dir }}:/etc/promtail:ro"
+      - "{{ promtail_image }}"
+      - "-config.file=/etc/promtail/{{ promtail_config_filename }}"
+      - -check-syntax
+  changed_when: false
+
+- name: Start or update the Promtail container
+  community.docker.docker_container:
+    name: "{{ promtail_container_name }}"
+    image: "{{ promtail_image }}"
+    state: started
+    recreate: "{{ promtail_config_result.changed }}"
+    pull: missing
+    detach: true
+    restart_policy: unless-stopped
+    stop_timeout: 30
+    user: 0:0
+    command:
+      - "-config.file=/etc/promtail/{{ promtail_config_filename }}"
+    command_handling: correct
+    published_ports:
+      - >-
+        {{ promtail_bind_address }}:{{ promtail_port }}:{{ promtail_container_port }}
+    volumes:
+      - "{{ promtail_config_dir }}:/etc/promtail:ro"
+      - "{{ promtail_positions_dir }}:/var/lib/promtail"
+      - "{{ promtail_application_log_dir }}:{{ promtail_application_log_dir }}:ro"
+      - /var/log/nginx:/var/log/nginx:ro
+    comparisons:
+      command: strict
+      published_ports: strict
+      volumes: strict
+    log_driver: json-file
+    log_options:
+      max-size: 10m
+      max-file: "3"
+
+- name: Wait for Promtail to become ready
+  ansible.builtin.uri:
+    url: "http://{{ promtail_bind_address }}:{{ promtail_port }}/ready"
+    method: GET
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: promtail_readiness_check
+  until:
+    - (promtail_readiness_check.status | default(0)) == 200
+    - "'Ready' in (promtail_readiness_check.content | default(''))"
+  retries: "{{ promtail_readiness_retries }}"
+  delay: "{{ promtail_readiness_delay }}"
+  changed_when: false

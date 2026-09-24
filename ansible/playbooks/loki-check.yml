@@ -1,0 +1,175 @@
+---
+- name: Generate a log marker through the application Nginx
+  hosts: app
+  become: true
+  gather_facts: false
+
+  vars:
+    loki_check_marker: /observability-promtail-e2e
+    loki_check_application_marker: observability-promtail-application-e2e
+
+  tasks:
+    - name: Record the beginning of the Loki check
+      ansible.builtin.command:
+        argv:
+          - date
+          # Nginx $time_iso8601 has one-second precision. Starting the Loki
+          # range at the exact nanosecond could exclude a marker written in
+          # the same second but timestamped at its beginning.
+          - +%s000000000
+      register: loki_check_started_at
+      changed_when: false
+
+    - name: Generate a fixed HTTP request marker through local Nginx
+      ansible.builtin.uri:
+        url: >-
+          https://127.0.0.1:{{ nginx_https_port }}{{ loki_check_marker }}
+        method: GET
+        headers:
+          Host: "{{ deploy_domain }}"
+        follow_redirects: none
+        validate_certs: false
+        status_code:
+          - 200
+          - 404
+        timeout: 5
+      changed_when: false
+
+    - name: Generate a JSON application log marker through container stdout
+      community.docker.docker_container_exec:
+        container: "{{ deploy_container_name }}"
+        argv:
+          - /bin/sh
+          - -c
+          - >-
+            printf '%s\n'
+            '{"level":"INFO","logger_name":"observability.e2e","message":"{{
+              loki_check_application_marker
+            }}"}' > /proc/1/fd/1
+      changed_when: false
+
+    - name: Flush the buffered Nginx access log
+      ansible.builtin.command:
+        argv:
+          - nginx
+          - -s
+          - reopen
+      changed_when: false
+
+- name: Verify log delivery to Loki
+  hosts: monitoring
+  become: true
+  gather_facts: false
+
+  vars:
+    loki_check_marker: /observability-promtail-e2e
+    loki_check_application_marker: observability-promtail-application-e2e
+    loki_check_nginx_query: >-
+      {job="nginx",log_type="access"} |= "{{ loki_check_marker }}"
+    loki_check_application_query: >-
+      {job="application"} |= "{{ loki_check_application_marker }}"
+    loki_check_query_range_url: >-
+      http://{{ private_ip }}:{{ loki_port }}/loki/api/v1/query_range
+
+  tasks:
+    - name: Check Loki readiness
+      ansible.builtin.uri:
+        url: "http://{{ private_ip }}:{{ loki_port }}/ready"
+        method: GET
+        status_code: 200
+        timeout: 5
+      register: loki_check_readiness
+      until: (loki_check_readiness.status | default(0)) == 200
+      retries: "{{ loki_readiness_retries }}"
+      delay: "{{ loki_readiness_delay }}"
+      changed_when: false
+
+    - name: Wait for the Nginx marker in Loki
+      ansible.builtin.uri:
+        url: >-
+          {{ loki_check_query_range_url }}?query={{
+            loki_check_nginx_query | urlencode
+          }}&start={{
+            hostvars[groups['app'][0]].loki_check_started_at.stdout
+          }}&direction=forward&limit=100
+        method: GET
+        status_code: 200
+        return_content: true
+        timeout: 5
+      register: loki_check_nginx_result
+      until:
+        - (loki_check_nginx_result.json.status | default('')) == 'success'
+        - >-
+          (loki_check_nginx_result.json.data.result | default([]) | length)
+          > 0
+      retries: >-
+        {{ hostvars[groups['app'][0]].promtail_readiness_retries }}
+      delay: "{{ hostvars[groups['app'][0]].promtail_readiness_delay }}"
+      changed_when: false
+
+    - name: Verify mandatory labels on the Nginx marker stream
+      ansible.builtin.assert:
+        that:
+          - item.stream.job == 'nginx'
+          - item.stream.log_type == 'access'
+          - >-
+            item.stream.env
+            == hostvars[groups['app'][0]].promtail_environment
+          - item.stream.app == 'nginx'
+          - >-
+            item.stream.host
+            == hostvars[groups['app'][0]].promtail_host_label
+        fail_msg: >-
+          The Nginx stream must contain non-empty job, env, app and host
+          labels, and log_type must be access.
+      loop: "{{ loki_check_nginx_result.json.data.result }}"
+      loop_control:
+        label: "{{ item.stream | to_json }}"
+      changed_when: false
+
+    - name: Wait for fresh application logs in Loki
+      ansible.builtin.uri:
+        url: >-
+          {{ loki_check_query_range_url }}?query={{
+            loki_check_application_query | urlencode
+          }}&start={{
+            hostvars[groups['app'][0]].loki_check_started_at.stdout
+          }}&direction=forward&limit=100
+        method: GET
+        status_code: 200
+        return_content: true
+        timeout: 5
+      register: loki_check_application_result
+      until:
+        - >-
+          (loki_check_application_result.json.status | default(''))
+          == 'success'
+        - >-
+          (
+            loki_check_application_result.json.data.result
+            | default([])
+            | length
+          ) > 0
+      retries: >-
+        {{ hostvars[groups['app'][0]].promtail_readiness_retries }}
+      delay: "{{ hostvars[groups['app'][0]].promtail_readiness_delay }}"
+      changed_when: false
+
+    - name: Verify mandatory labels on fresh application streams
+      ansible.builtin.assert:
+        that:
+          - item.stream.job == 'application'
+          - >-
+            item.stream.env
+            == hostvars[groups['app'][0]].promtail_environment
+          - item.stream.app | default('') | length > 0
+          - >-
+            item.stream.host
+            == hostvars[groups['app'][0]].promtail_host_label
+        fail_msg: >-
+          Fresh application streams must contain non-empty job, env, app and
+          host labels.
+      loop: "{{ loki_check_application_result.json.data.result }}"
+      loop_control:
+        label: "{{ item.stream | to_json }}"
+      changed_when: false

@@ -1,0 +1,38 @@
+# macOS and editor files
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Python / Ansible local data
+.venv/
+.ansible/
+*.retry
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Terraform local data and state
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+!*.tfvars.example
+backend.hcl
+backend.hcl.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Generated kubeconfig files
+kubeconfig
+kubeconfig.*

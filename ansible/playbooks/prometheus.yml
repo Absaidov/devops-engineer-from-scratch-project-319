@@ -1,0 +1,102 @@
+---
+- name: Allow Prometheus to scrape the application server
+  hosts: app
+  become: true
+
+  tasks:
+    - name: Validate the monitoring server allowlist
+      ansible.builtin.assert:
+        that:
+          - monitoring_allowed_cidrs is sequence
+          - monitoring_allowed_cidrs is not string
+          - monitoring_allowed_cidrs | length > 0
+          - "'0.0.0.0/0' not in monitoring_allowed_cidrs"
+          - "'::/0' not in monitoring_allowed_cidrs"
+        fail_msg: >-
+          Add a monitoring host with private_ip to
+          ansible/inventories/production.ini.
+          Application metrics must never be open to the public Internet.
+
+    - name: Allow the management proxy from Prometheus
+      community.general.ufw:
+        rule: allow
+        direction: in
+        proto: tcp
+        port: "{{ monitoring_proxy_port | string }}"
+        from_ip: "{{ item }}"
+        comment: Prometheus application metrics
+      loop: "{{ monitoring_allowed_cidrs }}"
+
+    - name: Allow Node Exporter from Prometheus
+      community.general.ufw:
+        rule: allow
+        direction: in
+        proto: tcp
+        port: "{{ node_exporter_port | string }}"
+        from_ip: "{{ item }}"
+        comment: Prometheus Node Exporter
+      loop: "{{ monitoring_allowed_cidrs }}"
+
+    - name: Update the Nginx management allowlist
+      ansible.builtin.include_role:
+        name: geerlingguy.nginx
+      vars:
+        nginx_vhosts: "{{ nginx_application_vhosts }}"
+        nginx_tls_enabled: true
+
+    - name: Validate the updated Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Apply the updated Nginx allowlist
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verify application metrics through Nginx
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ monitoring_proxy_port }}/actuator/prometheus
+        method: GET
+        url_username: "{{ monitoring_basic_auth_username }}"
+        url_password: "{{ vault_monitoring_basic_auth_password }}"
+        force_basic_auth: true
+        status_code: 200
+        timeout: 5
+      changed_when: false
+      no_log: true
+
+- name: Deploy Prometheus and Grafana monitoring server
+  hosts: monitoring
+  become: true
+
+  pre_tasks:
+    - name: Ensure the application host is present in inventory
+      ansible.builtin.assert:
+        that:
+          - groups.get('app', []) | length > 0
+        fail_msg: Add the application server to the app inventory group.
+
+    - name: Ensure private addresses are present in inventory
+      ansible.builtin.assert:
+        that:
+          - private_ip is defined
+          - private_ip | trim | length > 0
+          - hostvars[groups['app'][0]].private_ip is defined
+          - hostvars[groups['app'][0]].private_ip | trim | length > 0
+        fail_msg: >-
+          Set private_ip for both app-server and monitoring-server in
+          ansible/inventories/production.ini.
+
+    - name: Ensure the application metrics password is available
+      ansible.builtin.assert:
+        that:
+          - vault_monitoring_basic_auth_password is defined
+          - vault_monitoring_basic_auth_password | trim | length > 0
+        fail_msg: >-
+          Define vault_monitoring_basic_auth_password in
+          ansible/group_vars/all/vault.yml using Ansible Vault.
+      no_log: true
+
+  roles:
+    - role: prometheus
+    - role: loki
+    - role: monitoring

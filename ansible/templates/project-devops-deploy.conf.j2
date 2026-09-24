@@ -1,0 +1,118 @@
+{% macro proxy_locations() %}
+    location /assets/ {
+        proxy_pass http://{{ deploy_bind_address }}:{{ deploy_application_port }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_cache static_cache;
+        proxy_cache_lock on;
+        proxy_cache_valid 200 7d;
+        proxy_hide_header Cache-Control;
+        proxy_hide_header Expires;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Cache-Status $upstream_cache_status always;
+    }
+
+    location / {
+        proxy_pass http://{{ deploy_bind_address }}:{{ deploy_application_port }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+{% endmacro %}
+{% macro management_location(path) %}
+    location = {{ path }} {
+        satisfy all;
+        allow 127.0.0.1;
+{% for cidr in monitoring_allowed_cidrs %}
+        allow {{ cidr }};
+{% endfor %}
+        deny all;
+
+        auth_basic "Application monitoring";
+        auth_basic_user_file {{ monitoring_basic_auth_file }};
+
+        proxy_pass http://{{ deploy_bind_address }}:{{ deploy_management_backend_port }};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+{% endmacro %}
+server {
+    listen {{ nginx_http_port }} default_server;
+{% if nginx_listen_ipv6 %}
+    listen [::]:{{ nginx_http_port }} default_server;
+{% endif %}
+    server_name {{ deploy_domains | join(' ') }};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ certbot_webroot }};
+        default_type text/plain;
+    }
+
+{% if nginx_tls_enabled %}
+    location / {
+        return 301 https://$host$request_uri;
+    }
+{% else %}
+{{ proxy_locations() }}
+{% endif %}
+}
+
+{% if nginx_tls_enabled %}
+server {
+    listen {{ nginx_https_port }} ssl http2 default_server;
+{% if nginx_listen_ipv6 %}
+    listen [::]:{{ nginx_https_port }} ssl http2 default_server;
+{% endif %}
+    server_name {{ deploy_domains | join(' ') }};
+
+    ssl_certificate /etc/letsencrypt/live/{{ deploy_domain }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ deploy_domain }}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+{{ proxy_locations() }}
+}
+{% endif %}
+
+server {
+    listen {{ monitoring_proxy_bind_address }}:{{ monitoring_proxy_port }} default_server;
+    server_name _;
+
+    access_log {{ nginx_management_access_log_path }} main;
+
+{{ management_location('/actuator/prometheus') }}
+{{ management_location('/actuator/health') }}
+{{ management_location('/actuator/health/liveness') }}
+{{ management_location('/actuator/health/readiness') }}
+
+    location = {{ nginx_stub_status_path }} {
+        allow 127.0.0.1;
+{% for cidr in monitoring_allowed_cidrs %}
+        allow {{ cidr }};
+{% endfor %}
+        deny all;
+
+        access_log off;
+        stub_status;
+    }
+
+    location / {
+        return 404;
+    }
+}

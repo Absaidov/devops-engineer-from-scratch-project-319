@@ -1,0 +1,14 @@
+---
+groups:
+  - name: target-availability
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus target is unavailable"
+          description: >-
+            Target {{ $labels.instance }} in job {{ $labels.job }} has been
+            unavailable for more than 2 minutes.

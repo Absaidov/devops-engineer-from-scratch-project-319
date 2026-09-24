@@ -1,0 +1,24 @@
+---
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: {{ grafana_contact_point_name | to_json }}
+    receivers:
+      - uid: {{ grafana_contact_point_uid | to_json }}
+        type: email
+        disableResolveMessage: false
+        settings:
+          addresses: {{ vault_grafana_smtp_user | to_json }}
+          singleEmail: true
+
+policies:
+  - orgId: 1
+    receiver: {{ grafana_contact_point_name | to_json }}
+    group_by:
+      - grafana_folder
+      - alertname
+      - service
+    group_wait: {{ grafana_notification_group_wait }}
+    group_interval: {{ grafana_notification_group_interval }}
+    repeat_interval: {{ grafana_notification_repeat_interval }}

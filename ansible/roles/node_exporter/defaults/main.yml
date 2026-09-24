@@ -1,0 +1,6 @@
+---
+node_exporter_package_name: prometheus-node-exporter
+node_exporter_service_name: prometheus-node-exporter
+node_exporter_config_path: /etc/default/prometheus-node-exporter
+node_exporter_check_address: 127.0.0.1
+node_exporter_extra_arguments: []

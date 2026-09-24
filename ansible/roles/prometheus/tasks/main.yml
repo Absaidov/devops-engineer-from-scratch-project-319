@@ -1,0 +1,317 @@
+---
+- name: Validate Prometheus configuration
+  ansible.builtin.assert:
+    that:
+      - prometheus_image is match('^prom/prometheus:v[0-9]+\.[0-9]+\.[0-9]+$')
+      - prometheus_bind_address | trim | length > 0
+      - prometheus_port | int > 0
+      - prometheus_port | int <= 65535
+      - prometheus_ssh_port | int > 0
+      - prometheus_ssh_port | int <= 65535
+      - prometheus_ui_allowed_cidrs is sequence
+      - prometheus_ui_allowed_cidrs is not string
+      - prometheus_ui_allowed_cidrs | length > 0
+      - prometheus_scrape_jobs is sequence
+      - prometheus_scrape_jobs is not string
+      - prometheus_scrape_jobs | length > 0
+      - prometheus_metric_checks is sequence
+      - prometheus_metric_checks is not string
+      - prometheus_metric_checks | length > 0
+      - >-
+        prometheus_scrape_jobs | map(attribute='job_name') | unique | list
+        | length == prometheus_scrape_jobs | length
+    fail_msg: >-
+      Use a pinned Prometheus image, valid ports, at least one UI access CIDR,
+      and a non-empty scrape job list with unique names.
+
+- name: Validate Prometheus scrape jobs
+  ansible.builtin.assert:
+    that:
+      - item.job_name | trim | length > 0
+      - item.targets is sequence
+      - item.targets is not string
+      - item.targets | length > 0
+    fail_msg: Every Prometheus scrape job must have a name and targets.
+  loop: "{{ prometheus_scrape_jobs }}"
+  loop_control:
+    label: "{{ item.job_name | default('unnamed') }}"
+
+- name: Validate Prometheus metric checks
+  ansible.builtin.assert:
+    that:
+      - item.name | trim | length > 0
+      - item.query | trim | length > 0
+    fail_msg: Every Prometheus metric check must have a name and a query.
+  loop: "{{ prometheus_metric_checks }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+
+- name: Install monitoring server packages
+  ansible.builtin.apt:
+    name:
+      - curl
+      - docker.io
+      - python3-requests
+      - ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Start and enable Docker on the monitoring server
+  ansible.builtin.systemd_service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Add the SSH user to the Docker group
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: true
+
+- name: Allow SSH to the monitoring server
+  community.general.ufw:
+    rule: allow
+    port: "{{ prometheus_ssh_port | string }}"
+    proto: tcp
+
+- name: Allow access to the Prometheus UI
+  community.general.ufw:
+    rule: allow
+    direction: in
+    proto: tcp
+    port: "{{ prometheus_port | string }}"
+    from_ip: "{{ item }}"
+    comment: Prometheus web interface
+  loop: "{{ prometheus_ui_allowed_cidrs }}"
+
+- name: Deny incoming monitoring traffic by default
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: Allow outgoing monitoring traffic by default
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Enable UFW on the monitoring server
+  community.general.ufw:
+    state: enabled
+
+- name: Create Prometheus configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ prometheus_config_dir }}"
+    - "{{ prometheus_rules_dir }}"
+
+- name: Create the protected Prometheus secrets directory
+  ansible.builtin.file:
+    path: "{{ prometheus_secrets_dir }}"
+    state: directory
+    owner: root
+    group: "{{ prometheus_container_gid }}"
+    mode: "0750"
+
+- name: Create the persistent Prometheus data directory
+  ansible.builtin.file:
+    path: "{{ prometheus_data_dir }}"
+    state: directory
+    owner: "{{ prometheus_container_uid }}"
+    group: "{{ prometheus_container_gid }}"
+    mode: "0750"
+
+- name: Install Prometheus alert rules
+  ansible.builtin.copy:
+    src: "{{ prometheus_rules_filename }}"
+    dest: "{{ prometheus_rules_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: prometheus_rules_result
+
+- name: Install Prometheus alert rule tests
+  ansible.builtin.copy:
+    src: "{{ prometheus_rules_test_filename }}"
+    dest: "{{ prometheus_rules_test_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the application scrape password
+  ansible.builtin.copy:
+    content: "{{ vault_monitoring_basic_auth_password }}"
+    dest: "{{ prometheus_application_password_path }}"
+    owner: root
+    group: "{{ prometheus_container_gid }}"
+    mode: "0640"
+  register: prometheus_password_result
+  no_log: true
+  diff: false
+
+- name: Render the Prometheus configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: "{{ prometheus_config_path }}"
+    owner: root
+    group: "{{ prometheus_container_gid }}"
+    mode: "0640"
+  register: prometheus_config_result
+  diff: false
+
+- name: Pull the pinned Prometheus image if it is missing
+  community.docker.docker_image_pull:
+    name: "{{ prometheus_image }}"
+    pull: not_present
+
+- name: Validate the rendered Prometheus configuration with promtool
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --entrypoint
+      - /bin/promtool
+      - --volume
+      - "{{ prometheus_config_dir }}:/etc/prometheus:ro"
+      - "{{ prometheus_image }}"
+      - check
+      - config
+      - "/etc/prometheus/{{ prometheus_config_filename }}"
+  changed_when: false
+
+- name: Validate Prometheus alert rules with promtool
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --entrypoint
+      - /bin/promtool
+      - --volume
+      - "{{ prometheus_config_dir }}:/etc/prometheus:ro"
+      - "{{ prometheus_image }}"
+      - check
+      - rules
+      - "/etc/prometheus/rules/{{ prometheus_rules_filename }}"
+  changed_when: false
+
+- name: Test Prometheus alert rules with promtool
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --entrypoint
+      - /bin/promtool
+      - --volume
+      - "{{ prometheus_config_dir }}:/etc/prometheus:ro"
+      - "{{ prometheus_image }}"
+      - test
+      - rules
+      - "/etc/prometheus/rules/{{ prometheus_rules_test_filename }}"
+  changed_when: false
+
+- name: Create the isolated monitoring Docker network
+  community.docker.docker_network:
+    name: "{{ prometheus_network_name }}"
+    state: present
+
+- name: Start or update the Prometheus container
+  community.docker.docker_container:
+    name: "{{ prometheus_container_name }}"
+    image: "{{ prometheus_image }}"
+    state: started
+    recreate: >-
+      {{
+        prometheus_config_result.changed
+        or prometheus_rules_result.changed
+        or prometheus_password_result.changed
+      }}
+    pull: missing
+    detach: true
+    restart_policy: unless-stopped
+    stop_timeout: 30
+    command:
+      - "--config.file=/etc/prometheus/{{ prometheus_config_filename }}"
+      - --storage.tsdb.path=/prometheus
+      - "--storage.tsdb.retention.time={{ prometheus_retention_time }}"
+      - "--web.listen-address=0.0.0.0:{{ prometheus_container_port }}"
+      - --log.format=json
+    command_handling: correct
+    published_ports:
+      - >-
+        {{ prometheus_bind_address }}:{{ prometheus_port }}:{{ prometheus_container_port }}
+    volumes:
+      - "{{ prometheus_config_dir }}:/etc/prometheus:ro"
+      - "{{ prometheus_data_dir }}:/prometheus"
+    networks:
+      - name: "{{ prometheus_network_name }}"
+    comparisons:
+      networks: strict
+      volumes: strict
+    log_driver: json-file
+    log_options:
+      max-size: 10m
+      max-file: "3"
+
+- name: Wait for Prometheus to become ready
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ prometheus_port }}/-/ready"
+    method: GET
+    status_code: 200
+    timeout: 5
+  register: prometheus_readiness_check
+  until: (prometheus_readiness_check.status | default(0)) == 200
+  retries: "{{ prometheus_readiness_retries }}"
+  delay: "{{ prometheus_readiness_delay }}"
+  changed_when: false
+
+- name: Check that every configured Prometheus target is up
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ prometheus_port }}/api/v1/query?query={{
+        ('up{job="' ~ item.job_name ~ '"} == 1') | urlencode
+      }}
+    method: GET
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: prometheus_target_check
+  until:
+    - (prometheus_target_check.json.status | default('')) == 'success'
+    - >-
+      (prometheus_target_check.json.data.result | default([]) | length)
+      == (item.targets | length)
+  retries: "{{ prometheus_readiness_retries }}"
+  delay: "{{ prometheus_readiness_delay }}"
+  changed_when: false
+  loop: "{{ prometheus_scrape_jobs }}"
+  loop_control:
+    label: "{{ item.job_name }}"
+
+- name: Check required Prometheus metrics
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ prometheus_port }}/api/v1/query?query={{
+        item.query | urlencode
+      }}
+    method: GET
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: prometheus_metric_check
+  until:
+    - (prometheus_metric_check.json.status | default('')) == 'success'
+    - prometheus_metric_check.json.data.result | default([]) | length > 0
+  retries: "{{ prometheus_readiness_retries }}"
+  delay: "{{ prometheus_readiness_delay }}"
+  changed_when: false
+  loop: "{{ prometheus_metric_checks }}"
+  loop_control:
+    label: "{{ item.name }}"

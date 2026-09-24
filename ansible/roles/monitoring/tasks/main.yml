@@ -1,0 +1,419 @@
+---
+- name: Validate Grafana configuration
+  ansible.builtin.assert:
+    that:
+      - grafana_image is match('^grafana/grafana:[0-9]+\.[0-9]+\.[0-9]+$')
+      - grafana_admin_user | trim | length > 0
+      - grafana_bind_address | trim | length > 0
+      - grafana_port | int > 0
+      - grafana_port | int <= 65535
+      - grafana_ui_allowed_cidrs is sequence
+      - grafana_ui_allowed_cidrs is not string
+      - grafana_ui_allowed_cidrs | length > 0
+      - grafana_dashboards is sequence
+      - grafana_dashboards is not string
+      - grafana_dashboards | length > 0
+      - grafana_alert_rules is sequence
+      - grafana_alert_rules is not string
+      - grafana_alert_rules | length > 0
+      - grafana_contact_point_name | trim | length > 0
+      - grafana_contact_point_uid is match('^[A-Za-z0-9_-]{1,40}$')
+      - grafana_smtp_enabled | bool
+      - grafana_smtp_host | trim | length > 0
+      - >-
+        grafana_dashboards | map(attribute='uid') | unique | list | length
+        == grafana_dashboards | length
+      - >-
+        grafana_alert_rules | map(attribute='uid') | unique | list | length
+        == grafana_alert_rules | length
+      - >-
+        grafana_alert_rules | selectattr('uid', 'match', '^[A-Za-z0-9_-]{1,40}$')
+        | list | length == grafana_alert_rules | length
+    fail_msg: >-
+      Use a pinned Grafana image, valid UI and SMTP settings, and non-empty
+      dashboard and alert rule lists with unique valid UIDs.
+
+- name: Ensure the Grafana administrator password is available
+  ansible.builtin.assert:
+    that:
+      - vault_grafana_admin_password is defined
+      - vault_grafana_admin_password | trim | length > 0
+    fail_msg: >-
+      Define vault_grafana_admin_password in
+      ansible/group_vars/monitoring/vault.yml using Ansible Vault.
+  no_log: true
+
+- name: Ensure the Grafana SMTP credentials are available
+  ansible.builtin.assert:
+    that:
+      - vault_grafana_smtp_user is defined
+      - vault_grafana_smtp_user | trim | length > 0
+      - vault_grafana_smtp_password is defined
+      - vault_grafana_smtp_password | trim | length > 0
+    fail_msg: >-
+      Define vault_grafana_smtp_user and vault_grafana_smtp_password in
+      ansible/group_vars/monitoring/vault.yml using Ansible Vault.
+  no_log: true
+
+- name: Allow access to the Grafana UI
+  community.general.ufw:
+    rule: allow
+    direction: in
+    proto: tcp
+    port: "{{ grafana_port | string }}"
+    from_ip: "{{ item }}"
+    comment: Grafana web interface
+  loop: "{{ grafana_ui_allowed_cidrs }}"
+
+- name: Create Grafana configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ grafana_config_dir }}"
+    - "{{ grafana_provisioning_dir }}"
+    - "{{ grafana_datasources_dir }}"
+    - "{{ grafana_dashboard_providers_dir }}"
+    - "{{ grafana_alerting_dir }}"
+    - "{{ grafana_dashboards_host_dir }}"
+
+- name: Create the protected Grafana secrets directory
+  ansible.builtin.file:
+    path: "{{ grafana_secrets_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Create the persistent Grafana data directory
+  ansible.builtin.file:
+    path: "{{ grafana_data_dir }}"
+    state: directory
+    owner: "{{ grafana_container_uid }}"
+    group: "{{ grafana_container_gid }}"
+    mode: "0750"
+
+- name: Install the Grafana administrator password
+  ansible.builtin.copy:
+    content: "{{ vault_grafana_admin_password }}"
+    dest: "{{ grafana_admin_password_path }}"
+    owner: "{{ grafana_container_uid }}"
+    group: "{{ grafana_container_gid }}"
+    mode: "0400"
+  register: monitoring_grafana_password_result
+  no_log: true
+  diff: false
+
+- name: Install the protected Grafana SMTP settings
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ item.dest }}"
+    owner: "{{ grafana_container_uid }}"
+    group: "{{ grafana_container_gid }}"
+    mode: "0400"
+  loop:
+    - content: "{{ vault_grafana_smtp_user }}"
+      dest: "{{ grafana_smtp_user_path }}"
+    - content: "{{ vault_grafana_smtp_password }}"
+      dest: "{{ grafana_smtp_password_path }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  register: monitoring_grafana_smtp_secrets_result
+  no_log: true
+  diff: false
+
+- name: Provision Grafana datasources
+  ansible.builtin.template:
+    src: datasources.yml.j2
+    dest: "{{ grafana_datasources_dir }}/{{ grafana_datasources_filename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: monitoring_grafana_datasources_result
+
+- name: Provision the Grafana dashboard provider
+  ansible.builtin.template:
+    src: dashboards.yml.j2
+    dest: >-
+      {{ grafana_dashboard_providers_dir }}/{{ grafana_dashboard_provider_filename }}
+    owner: root
+    group: root
+    mode: "0644"
+  register: monitoring_grafana_dashboard_provider_result
+
+- name: Provision Grafana alert rules
+  ansible.builtin.template:
+    src: alert-rules.yml.j2
+    dest: "{{ grafana_alerting_dir }}/{{ grafana_alert_rules_filename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: monitoring_grafana_alert_rules_result
+
+- name: Provision the Grafana email contact point and notification policy
+  ansible.builtin.template:
+    src: alert-resources.yml.j2
+    dest: "{{ grafana_alerting_dir }}/{{ grafana_alert_resources_filename }}"
+    owner: "{{ grafana_container_uid }}"
+    group: "{{ grafana_container_gid }}"
+    mode: "0400"
+  register: monitoring_grafana_alert_resources_result
+  no_log: true
+  diff: false
+
+- name: Install provisioned Grafana dashboards
+  ansible.builtin.copy:
+    src: "dashboards/{{ item.filename }}"
+    dest: "{{ grafana_dashboards_host_dir }}/{{ item.filename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: monitoring_grafana_dashboards_result
+  loop: "{{ grafana_dashboards }}"
+  loop_control:
+    label: "{{ item.uid }}"
+
+- name: Pull the pinned Grafana image if it is missing
+  community.docker.docker_image_pull:
+    name: "{{ grafana_image }}"
+    pull: not_present
+
+- name: Ensure the monitoring Docker network exists for Grafana
+  community.docker.docker_network:
+    name: "{{ grafana_network_name }}"
+    state: present
+
+- name: Start or update the Grafana container
+  community.docker.docker_container:
+    name: "{{ grafana_container_name }}"
+    image: "{{ grafana_image }}"
+    state: started
+    recreate: >-
+      {{
+        monitoring_grafana_password_result.changed
+        or monitoring_grafana_smtp_secrets_result.changed
+        or monitoring_grafana_datasources_result.changed
+        or monitoring_grafana_dashboard_provider_result.changed
+        or monitoring_grafana_alert_rules_result.changed
+        or monitoring_grafana_alert_resources_result.changed
+        or monitoring_grafana_dashboards_result.changed
+      }}
+    pull: missing
+    detach: true
+    restart_policy: unless-stopped
+    stop_timeout: 30
+    published_ports:
+      - >-
+        {{ grafana_bind_address }}:{{ grafana_port }}:{{ grafana_container_port }}
+    env:
+      GF_SECURITY_ADMIN_USER: "{{ grafana_admin_user }}"
+      GF_SECURITY_ADMIN_PASSWORD__FILE: >-
+        {{ grafana_admin_password_container_path }}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_LOG_MODE: console
+      GF_SMTP_ENABLED: "{{ grafana_smtp_enabled | bool | ternary('true', 'false') }}"
+      GF_SMTP_HOST: "{{ grafana_smtp_host }}"
+      GF_SMTP_USER__FILE: "{{ grafana_smtp_user_container_path }}"
+      GF_SMTP_PASSWORD__FILE: "{{ grafana_smtp_password_container_path }}"
+      GF_SMTP_FROM_ADDRESS__FILE: "{{ grafana_smtp_user_container_path }}"
+      GF_SMTP_FROM_NAME: "{{ grafana_smtp_from_name }}"
+      GF_SMTP_SKIP_VERIFY: >-
+        {{ grafana_smtp_skip_verify | bool | ternary('true', 'false') }}
+    volumes:
+      - "{{ grafana_data_dir }}:/var/lib/grafana"
+      - "{{ grafana_provisioning_dir }}:/etc/grafana/provisioning:ro"
+      - >-
+        {{ grafana_dashboards_host_dir }}:{{ grafana_dashboards_container_dir }}:ro
+      - >-
+        {{ grafana_admin_password_path }}:{{ grafana_admin_password_container_path }}:ro
+      - >-
+        {{ grafana_smtp_user_path }}:{{ grafana_smtp_user_container_path }}:ro
+      - >-
+        {{ grafana_smtp_password_path }}:{{ grafana_smtp_password_container_path }}:ro
+    networks:
+      - name: "{{ grafana_network_name }}"
+    comparisons:
+      env: strict
+      networks: strict
+      volumes: strict
+    log_driver: json-file
+    log_options:
+      max-size: 10m
+      max-file: "3"
+
+- name: Wait for Grafana to become ready
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ grafana_port }}/api/health"
+    method: GET
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: monitoring_grafana_readiness_check
+  until:
+    - (monitoring_grafana_readiness_check.status | default(0)) == 200
+    - >-
+      (monitoring_grafana_readiness_check.json.database | default('')) == 'ok'
+  retries: "{{ grafana_readiness_retries }}"
+  delay: "{{ grafana_readiness_delay }}"
+  changed_when: false
+
+- name: Verify the provisioned Prometheus datasource
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ grafana_port }}/api/datasources/uid/{{
+        grafana_prometheus_datasource_uid
+      }}
+    method: GET
+    url_username: "{{ grafana_admin_user }}"
+    url_password: "{{ vault_grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: monitoring_grafana_prometheus_datasource_check
+  until:
+    - >-
+      (monitoring_grafana_prometheus_datasource_check.status | default(0))
+      == 200
+    - >-
+      (monitoring_grafana_prometheus_datasource_check.json.url | default(''))
+      == grafana_prometheus_url
+  retries: "{{ grafana_readiness_retries }}"
+  delay: "{{ grafana_readiness_delay }}"
+  changed_when: false
+  no_log: true
+
+- name: Verify the provisioned Grafana dashboards
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ grafana_port }}/api/dashboards/uid/{{ item.uid }}
+    method: GET
+    url_username: "{{ grafana_admin_user }}"
+    url_password: "{{ vault_grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+    timeout: 5
+  register: monitoring_grafana_dashboard_check
+  until: (monitoring_grafana_dashboard_check.status | default(0)) == 200
+  retries: "{{ grafana_readiness_retries }}"
+  delay: "{{ grafana_readiness_delay }}"
+  loop: "{{ grafana_dashboards }}"
+  loop_control:
+    label: "{{ item.uid }}"
+  changed_when: false
+  no_log: true
+
+- name: Verify the provisioned Grafana alert rules
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ grafana_port }}/api/v1/provisioning/alert-rules/{{
+        item.uid
+      }}
+    method: GET
+    url_username: "{{ grafana_admin_user }}"
+    url_password: "{{ vault_grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+    timeout: 5
+  loop: >-
+    {{ grafana_alert_rules + [{'uid': 'manual_test_alert'}] }}
+  loop_control:
+    label: "{{ item.uid }}"
+  changed_when: false
+  no_log: true
+
+- name: Verify the provisioned Grafana email contact point
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ grafana_port }}/api/v1/provisioning/contact-points
+    method: GET
+    url_username: "{{ grafana_admin_user }}"
+    url_password: "{{ vault_grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: monitoring_grafana_contact_point_check
+  failed_when: >-
+    monitoring_grafana_contact_point_check.status != 200
+    or (
+      monitoring_grafana_contact_point_check.json
+      | selectattr('uid', 'equalto', grafana_contact_point_uid)
+      | selectattr('name', 'equalto', grafana_contact_point_name)
+      | selectattr('type', 'equalto', 'email')
+      | list
+      | length
+    ) != 1
+  changed_when: false
+  no_log: true
+
+- name: Verify the provisioned Grafana notification policy
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ grafana_port }}/api/v1/provisioning/policies"
+    method: GET
+    url_username: "{{ grafana_admin_user }}"
+    url_password: "{{ vault_grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: monitoring_grafana_notification_policy_check
+  failed_when: >-
+    monitoring_grafana_notification_policy_check.status != 200
+    or monitoring_grafana_notification_policy_check.json.receiver
+       != grafana_contact_point_name
+  changed_when: false
+  no_log: true
+
+- name: Verify that Grafana can query Prometheus
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ grafana_port }}/api/datasources/uid/{{
+        grafana_prometheus_datasource_uid
+      }}/health
+    method: GET
+    url_username: "{{ grafana_admin_user }}"
+    url_password: "{{ vault_grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: monitoring_grafana_prometheus_health_check
+  until:
+    - (monitoring_grafana_prometheus_health_check.status | default(0)) == 200
+    - >-
+      (monitoring_grafana_prometheus_health_check.json.status | default(''))
+      == 'OK'
+  retries: "{{ grafana_readiness_retries }}"
+  delay: "{{ grafana_readiness_delay }}"
+  changed_when: false
+  no_log: true
+
+- name: Verify that Grafana can query Loki
+  ansible.builtin.uri:
+    url: >-
+      http://127.0.0.1:{{ grafana_port }}/api/datasources/uid/{{
+        grafana_loki_datasource_uid
+      }}/health
+    method: GET
+    url_username: "{{ grafana_admin_user }}"
+    url_password: "{{ vault_grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: monitoring_grafana_loki_health_check
+  until:
+    - (monitoring_grafana_loki_health_check.status | default(0)) == 200
+    - >-
+      (monitoring_grafana_loki_health_check.json.status | default('')) == 'OK'
+  retries: "{{ grafana_readiness_retries }}"
+  delay: "{{ grafana_readiness_delay }}"
+  changed_when: false
+  no_log: true

@@ -1,0 +1,89 @@
+---
+- name: Verify the Prometheus deployment
+  hosts: monitoring
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check Prometheus readiness
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ prometheus_port }}/-/ready"
+        method: GET
+        status_code: 200
+        timeout: 5
+      changed_when: false
+      tags:
+        - targets
+
+    - name: Check the live Prometheus configuration with promtool
+      community.docker.docker_container_exec:
+        container: "{{ prometheus_container_name }}"
+        argv:
+          - /bin/promtool
+          - check
+          - config
+          - "/etc/prometheus/{{ prometheus_config_filename }}"
+      register: prometheus_config_check
+      failed_when: prometheus_config_check.rc != 0
+      changed_when: false
+      tags:
+        - config
+
+    - name: Test the live Prometheus alert rules with promtool
+      community.docker.docker_container_exec:
+        container: "{{ prometheus_container_name }}"
+        argv:
+          - /bin/promtool
+          - test
+          - rules
+          - "/etc/prometheus/rules/{{ prometheus_rules_test_filename }}"
+      register: prometheus_rules_test
+      failed_when: prometheus_rules_test.rc != 0
+      changed_when: false
+      tags:
+        - config
+
+    - name: Verify that every configured target is up
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ prometheus_port }}/api/v1/query?query={{
+            ('up{job="' ~ item.job_name ~ '"} == 1') | urlencode
+          }}
+        method: GET
+        status_code: 200
+        return_content: true
+        timeout: 5
+      register: prometheus_target_check
+      failed_when: >-
+        (prometheus_target_check.json.status | default('')) != 'success'
+        or
+        (prometheus_target_check.json.data.result | default([]) | length)
+        != (item.targets | length)
+      changed_when: false
+      loop: "{{ prometheus_scrape_jobs }}"
+      loop_control:
+        label: "{{ item.job_name }}"
+      tags:
+        - targets
+
+    - name: Verify required Prometheus metrics
+      ansible.builtin.uri:
+        url: >-
+          http://127.0.0.1:{{ prometheus_port }}/api/v1/query?query={{
+            item.query | urlencode
+          }}
+        method: GET
+        status_code: 200
+        return_content: true
+        timeout: 5
+      register: prometheus_metric_check
+      failed_when: >-
+        (prometheus_metric_check.json.status | default('')) != 'success'
+        or
+        (prometheus_metric_check.json.data.result | default([]) | length) == 0
+      changed_when: false
+      loop: "{{ prometheus_metric_checks }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - targets

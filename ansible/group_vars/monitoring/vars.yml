@@ -1,0 +1,290 @@
+---
+prometheus_image: prom/prometheus:v3.14.0
+prometheus_container_name: prometheus
+prometheus_network_name: monitoring
+prometheus_container_port: 9090
+prometheus_container_uid: "65534"
+prometheus_container_gid: "65534"
+prometheus_config_filename: prometheus.yml
+prometheus_rules_filename: alert.rules.yml
+prometheus_rules_test_filename: alert.rules.test.yml
+
+prometheus_config_dir: /etc/prometheus
+prometheus_data_dir: /var/lib/prometheus
+prometheus_config_path: >-
+  {{ prometheus_config_dir }}/{{ prometheus_config_filename }}
+prometheus_rules_dir: "{{ prometheus_config_dir }}/rules"
+prometheus_rules_path: >-
+  {{ prometheus_rules_dir }}/{{ prometheus_rules_filename }}
+prometheus_rules_test_path: >-
+  {{ prometheus_rules_dir }}/{{ prometheus_rules_test_filename }}
+prometheus_secrets_dir: "{{ prometheus_config_dir }}/secrets"
+prometheus_application_password_path: >-
+  {{ prometheus_secrets_dir }}/application-basic-auth-password
+
+prometheus_bind_address: 0.0.0.0
+prometheus_port: 9090
+prometheus_ssh_port: 22
+prometheus_ui_allowed_cidrs:
+  - 0.0.0.0/0
+
+prometheus_scrape_interval: 15s
+prometheus_evaluation_interval: 15s
+prometheus_retention_time: 15d
+prometheus_readiness_retries: 30
+prometheus_readiness_delay: 2
+
+# Loki runs as a single binary beside Prometheus and Grafana. Its HTTP port is
+# published only on the monitoring VM private address so Promtail can push logs
+# over the VPC, while Grafana reaches it by container name on the Docker network.
+loki_image: grafana/loki:3.7.8
+loki_container_name: loki
+loki_network_name: "{{ prometheus_network_name }}"
+loki_container_port: 3100
+loki_container_uid: "10001"
+loki_container_gid: "10001"
+loki_config_dir: /etc/loki
+loki_config_filename: loki.yml
+loki_config_path: "{{ loki_config_dir }}/{{ loki_config_filename }}"
+loki_data_dir: /var/lib/loki
+loki_bind_address: "{{ private_ip }}"
+loki_port: 3100
+loki_allowed_cidrs:
+  - "{{ hostvars[groups['app'][0]].private_ip }}/32"
+loki_retention_period: 168h
+loki_schema_from: "2024-01-01"
+loki_readiness_retries: 30
+loki_readiness_delay: 2
+
+# All scrape targets are generated from inventory and shared group variables.
+# Add future exporters to this list instead of editing prometheus.yml.j2.
+prometheus_scrape_jobs:
+  - job_name: prometheus
+    metrics_path: /metrics
+    targets:
+      - "127.0.0.1:{{ prometheus_container_port }}"
+  - job_name: node_exporter
+    metrics_path: /metrics
+    targets:
+      - >-
+        {{ hostvars[groups['app'][0]].private_ip }}:{{ node_exporter_port }}
+  - job_name: application
+    metrics_path: /actuator/prometheus
+    basic_auth: true
+    targets:
+      - >-
+        {{ hostvars[groups['app'][0]].private_ip }}:{{ monitoring_proxy_port }}
+  - job_name: nginx
+    metrics_path: /metrics
+    targets:
+      - >-
+        {{ hostvars[groups['app'][0]].private_ip }}:{{ nginx_exporter_port }}
+
+# Besides checking target availability, verify that the exporter exposes the
+# metric families used by the provisioned Grafana dashboard.
+prometheus_metric_checks:
+  - name: Nginx exporter reports a healthy scrape
+    query: 'nginx_up{job="nginx"} == 1'
+  - name: Nginx active connections are available
+    query: 'nginx_connections_active{job="nginx"}'
+  - name: Nginx HTTP request counter is available
+    query: 'nginx_http_requests_total{job="nginx"}'
+
+# Grafana runs beside Prometheus in the same Docker network. The image version
+# is pinned so repeated deployments are predictable.
+grafana_image: grafana/grafana:13.2.2
+grafana_container_name: grafana
+grafana_network_name: "{{ prometheus_network_name }}"
+grafana_container_port: 3000
+grafana_container_uid: "472"
+grafana_container_gid: "472"
+
+grafana_bind_address: 0.0.0.0
+grafana_port: 3000
+grafana_admin_user: admin
+grafana_ui_allowed_cidrs:
+  - 0.0.0.0/0
+
+grafana_config_dir: /etc/grafana
+grafana_provisioning_dir: "{{ grafana_config_dir }}/provisioning"
+grafana_datasources_dir: "{{ grafana_provisioning_dir }}/datasources"
+grafana_dashboard_providers_dir: "{{ grafana_provisioning_dir }}/dashboards"
+grafana_alerting_dir: "{{ grafana_provisioning_dir }}/alerting"
+grafana_dashboards_host_dir: "{{ grafana_config_dir }}/dashboards"
+grafana_dashboards_container_dir: /etc/grafana/dashboards
+grafana_data_dir: /var/lib/grafana
+grafana_secrets_dir: "{{ grafana_config_dir }}/secrets"
+grafana_admin_password_path: "{{ grafana_secrets_dir }}/admin-password"
+grafana_admin_password_container_path: /run/secrets/grafana-admin-password
+grafana_smtp_user_path: "{{ grafana_secrets_dir }}/smtp-user"
+grafana_smtp_password_path: "{{ grafana_secrets_dir }}/smtp-password"
+grafana_smtp_user_container_path: /run/secrets/grafana-smtp-user
+grafana_smtp_password_container_path: /run/secrets/grafana-smtp-password
+
+grafana_prometheus_url: >-
+  http://{{ prometheus_container_name }}:{{ prometheus_container_port }}
+grafana_prometheus_datasource_name: Prometheus
+grafana_prometheus_datasource_uid: prometheus
+grafana_loki_url: http://loki:3100
+grafana_loki_datasource_name: Loki
+grafana_loki_datasource_uid: loki
+grafana_datasources_filename: datasources.yml
+grafana_dashboard_provider_filename: dashboards.yml
+grafana_alert_rules_filename: alert-rules.yml
+grafana_alert_resources_filename: alert-resources.yml
+grafana_dashboard_provider_name: project-observability
+grafana_dashboard_folder: Observability
+grafana_dashboards_update_interval: 30
+grafana_readiness_retries: 30
+grafana_readiness_delay: 2
+
+# Email is the notification channel for Grafana Alerting. The SMTP login and
+# application password are stored in group_vars/monitoring/vault.yml.
+grafana_smtp_enabled: true
+grafana_smtp_host: smtp.yandex.ru:465
+grafana_smtp_from_name: Grafana Observability
+grafana_smtp_skip_verify: false
+
+grafana_alert_folder: Observability Alerts
+grafana_alert_rule_group: critical-events
+grafana_alert_evaluation_interval: 1m
+grafana_contact_point_name: operations-email
+grafana_contact_point_uid: operations_email
+grafana_notification_group_wait: 30s
+grafana_notification_group_interval: 5m
+grafana_notification_repeat_interval: 4h
+
+# Set only for a controlled notification test. The regular deployment keeps
+# the synthetic rule in the Normal state.
+grafana_test_alert_enabled: false
+
+grafana_alert_rules:
+  - uid: application_down
+    title: Application container is unavailable
+    expression: 'min(up{job="application"})'
+    evaluator: lt
+    threshold: 1
+    pending_for: 2m
+    no_data_state: Alerting
+    service: application
+    severity: critical
+    summary: Application container is unavailable
+    description: >-
+      Prometheus cannot scrape the application container for more than 2
+      minutes.
+    dashboard_uid: application-overview
+    panel_id: 1
+  - uid: application_http_5xx_high
+    title: Application HTTP 5xx ratio is high
+    expression: >-
+      100 * ((sum(rate(http_server_requests_seconds_count{
+      job="application",status=~"5..",uri!~"/actuator.*"}[5m])) or vector(0))
+      / clamp_min((sum(rate(http_server_requests_seconds_count{
+      job="application",uri!~"/actuator.*"}[5m])) or vector(0)), 0.001))
+    evaluator: gt
+    threshold: 5
+    pending_for: 5m
+    no_data_state: OK
+    service: application
+    severity: critical
+    summary: Application HTTP 5xx ratio exceeds 5 percent
+    description: >-
+      More than 5 percent of application requests returned HTTP 5xx during
+      the last 5 minutes.
+    dashboard_uid: http-performance
+    panel_id: 2
+  - uid: node_cpu_high
+    title: Host CPU usage is high
+    expression: >-
+      100 - (avg(rate(node_cpu_seconds_total{
+      job="node_exporter",mode="idle"}[5m])) * 100)
+    evaluator: gt
+    threshold: 85
+    pending_for: 10m
+    no_data_state: Alerting
+    service: application-host
+    severity: warning
+    summary: Host CPU usage exceeds 85 percent
+    description: Application host CPU usage remains above 85 percent for 10 minutes.
+    dashboard_uid: system-overview
+    panel_id: 5
+  - uid: node_memory_high
+    title: Host memory usage is high
+    expression: >-
+      100 * (1 - (sum(node_memory_MemAvailable_bytes{job="node_exporter"})
+      / sum(node_memory_MemTotal_bytes{job="node_exporter"})))
+    evaluator: gt
+    threshold: 90
+    pending_for: 10m
+    no_data_state: Alerting
+    service: application-host
+    severity: warning
+    summary: Host memory usage exceeds 90 percent
+    description: Application host memory usage remains above 90 percent for 10 minutes.
+    dashboard_uid: system-overview
+    panel_id: 6
+  - uid: node_root_disk_high
+    title: Host root filesystem is almost full
+    expression: >-
+      100 * (1 - (node_filesystem_avail_bytes{
+      job="node_exporter",mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+      / node_filesystem_size_bytes{
+      job="node_exporter",mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}))
+    evaluator: gt
+    threshold: 85
+    pending_for: 10m
+    no_data_state: Alerting
+    service: application-host
+    severity: warning
+    summary: Host root filesystem usage exceeds 85 percent
+    description: Root filesystem usage remains above 85 percent for 10 minutes.
+    dashboard_uid: system-overview
+    panel_id: 7
+  - uid: application_metrics_missing
+    title: Application metrics are missing
+    expression: >-
+      absent_over_time(process_uptime_seconds{job="application"}[5m])
+    evaluator: gt
+    threshold: 0.5
+    pending_for: 1m
+    no_data_state: OK
+    service: application-metrics
+    severity: critical
+    summary: Application metrics have been missing for more than 5 minutes
+    description: >-
+      The process_uptime_seconds metric has not been received from the
+      application during the last 5 minutes.
+    dashboard_uid: status-page
+    panel_id: 6
+  - uid: application_latency_high
+    title: Application HTTP latency is high
+    expression: >-
+      histogram_quantile(0.95, sum by (le) (rate(
+      http_server_requests_seconds_bucket{
+      job="application",uri!~"/actuator.*"}[5m])))
+    evaluator: gt
+    threshold: 1
+    pending_for: 5m
+    no_data_state: OK
+    service: application
+    severity: warning
+    summary: Application p95 latency exceeds 1 second
+    description: >-
+      The 95th percentile of application HTTP request latency remains above
+      1 second for 5 minutes.
+    dashboard_uid: http-performance
+    panel_id: 4
+
+grafana_dashboards:
+  - filename: system-overview.json
+    uid: system-overview
+  - filename: application-overview.json
+    uid: application-overview
+  - filename: http-performance.json
+    uid: http-performance
+  - filename: status-page.json
+    uid: status-page
+  - filename: nginx-overview.json
+    uid: nginx-overview
+  - filename: logs-overview.json
+    uid: logs-overview

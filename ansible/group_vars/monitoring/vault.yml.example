@@ -1,0 +1,5 @@
+---
+# Encrypt the real value with ansible-vault before adding it to vault.yml.
+vault_grafana_admin_password: replace-with-grafana-admin-password
+vault_grafana_smtp_user: replace-with-yandex-email-address
+vault_grafana_smtp_password: replace-with-yandex-mail-application-password

@@ -1,0 +1,77 @@
+---
+- name: Validate Node Exporter configuration
+  ansible.builtin.assert:
+    that:
+      - node_exporter_listen_address | trim | length > 0
+      - node_exporter_port | int > 0
+      - node_exporter_port | int <= 65535
+      - node_exporter_enabled_collectors is sequence
+      - node_exporter_enabled_collectors is not string
+      - node_exporter_enabled_collectors | length > 0
+      - node_exporter_extra_arguments is sequence
+      - node_exporter_extra_arguments is not string
+      - monitoring_allowed_cidrs is sequence
+      - monitoring_allowed_cidrs is not string
+      - "'0.0.0.0/0' not in monitoring_allowed_cidrs"
+      - "'::/0' not in monitoring_allowed_cidrs"
+    fail_msg: >-
+      Configure a valid Node Exporter port and allow only trusted private
+      monitoring-server CIDRs.
+
+- name: Install Node Exporter
+  ansible.builtin.apt:
+    name:
+      - "{{ node_exporter_package_name }}"
+      - dbus
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    install_recommends: false
+  notify: Restart Node Exporter
+
+- name: Configure Node Exporter
+  ansible.builtin.template:
+    src: prometheus-node-exporter.j2
+    dest: "{{ node_exporter_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Node Exporter
+
+- name: Enable and start Node Exporter
+  ansible.builtin.systemd_service:
+    name: "{{ node_exporter_service_name }}"
+    state: started
+    enabled: true
+
+- name: Allow Node Exporter from monitoring servers
+  community.general.ufw:
+    rule: allow
+    direction: in
+    proto: tcp
+    port: "{{ node_exporter_port | string }}"
+    from_ip: "{{ item }}"
+    comment: Prometheus Node Exporter
+  loop: "{{ monitoring_allowed_cidrs }}"
+
+- name: Apply Node Exporter configuration changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Read Node Exporter metrics locally
+  ansible.builtin.uri:
+    url: >-
+      http://{{ node_exporter_check_address }}:{{ node_exporter_port }}/metrics
+    method: GET
+    status_code: 200
+    return_content: true
+    timeout: 5
+  register: node_exporter_metrics
+  changed_when: false
+
+- name: Verify required Node Exporter collectors
+  ansible.builtin.assert:
+    that:
+      - "'node_exporter_build_info' in node_exporter_metrics.content"
+      - "'node_processes_pids' in node_exporter_metrics.content"
+      - "'node_systemd_unit_state' in node_exporter_metrics.content"
+    fail_msg: Required Node Exporter collectors do not expose metrics.

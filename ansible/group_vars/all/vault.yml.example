@@ -1,0 +1,4 @@
+---
+# Encrypt the real value with ansible-vault before adding it to vault.yml.
+# This password is shared by Nginx on the app host and Prometheus.
+vault_monitoring_basic_auth_password: replace-with-monitoring-password

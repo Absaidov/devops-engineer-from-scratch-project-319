@@ -1,0 +1,27 @@
+---
+deploy_container_environment: {}
+deploy_container_published_ports:
+  - >-
+    {{ deploy_bind_address }}:{{ deploy_application_port }}:{{ deploy_application_port }}
+  - >-
+    {{ deploy_bind_address }}:{{ deploy_management_backend_port }}:{{ deploy_management_port }}
+deploy_base_dir: /srv/project-devops-deploy
+deploy_log_dir: "{{ deploy_base_dir }}/logs"
+deploy_config_dir: /etc/project-devops-deploy
+deploy_migration_dir: "{{ deploy_config_dir }}/migrations"
+deploy_application_env_file: "{{ deploy_config_dir }}/application.env"
+deploy_migration_env_file: "{{ deploy_config_dir }}/migration.env"
+deploy_logging_config_file: "{{ deploy_config_dir }}/logback-spring.xml"
+deploy_logging_config_container_path: /app/config/logback-spring.xml
+deploy_migration_container_name: "{{ deploy_container_name }}-migration"
+deploy_migration_image: flyway/flyway:13.4.0-alpine
+deploy_migration_signature_label: io.hexlet.project-devops-deploy.migration-signature
+deploy_container_volumes:
+  - "{{ deploy_log_dir }}:/var/log/project-devops-deploy"
+  - >-
+    {{ deploy_logging_config_file }}:{{ deploy_logging_config_container_path }}:ro
+deploy_container_stop_timeout: 30
+deploy_readiness_url: >-
+  http://{{ deploy_bind_address }}:{{ deploy_management_backend_port }}/actuator/health/readiness
+deploy_readiness_retries: 40
+deploy_readiness_delay: 3

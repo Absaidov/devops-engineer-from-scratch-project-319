@@ -1,0 +1,225 @@
+---
+- name: Ensure deployment secrets are provided
+  ansible.builtin.assert:
+    that:
+      - vault_yc_registry_key is defined
+      - vault_yc_registry_key | trim | length > 0
+      - vault_db_username is defined
+      - vault_db_username | trim | length > 0
+      - vault_db_password is defined
+      - vault_db_password | trim | length > 0
+      - vault_s3_access_key is defined
+      - vault_s3_access_key | trim | length > 0
+      - vault_s3_secret_key is defined
+      - vault_s3_secret_key | trim | length > 0
+      - deploy_db_url is defined
+      - deploy_db_url | trim | length > 0
+    fail_msg: >-
+      Define the registry key, database credentials, and S3 access keys in
+      ansible/group_vars/app/vault.yml, and the database connection parameters
+      in ansible/group_vars/app/vars.yml.
+  no_log: true
+
+- name: Ensure an immutable image tag is used
+  ansible.builtin.assert:
+    that:
+      - deploy_image_tag is match('^[0-9a-f]{40}$')
+    fail_msg: >-
+      deploy_image_tag must be a full 40-character Git commit SHA.
+      Mutable tags such as latest are not allowed.
+
+- name: Log in to Yandex Container Registry
+  community.docker.docker_login:
+    registry_url: "{{ deploy_registry_url }}"
+    username: "{{ deploy_registry_username }}"
+    password: "{{ vault_yc_registry_key }}"
+  no_log: true
+
+- name: Pull the application image if it is missing
+  community.docker.docker_image_pull:
+    name: "{{ deploy_image }}"
+    pull: not_present
+
+- name: Create persistent application directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ deploy_log_dir }}"
+    - "{{ deploy_config_dir }}"
+    - "{{ deploy_migration_dir }}"
+
+- name: Install database migrations
+  ansible.builtin.copy:
+    src: migrations/
+    dest: "{{ deploy_migration_dir }}/"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Calculate checksums of installed migrations
+  ansible.builtin.find:
+    paths: "{{ deploy_migration_dir }}"
+    patterns: "*.sql"
+    file_type: file
+    recurse: true
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: deploy_migration_files
+
+- name: Initialize the migration signature components
+  ansible.builtin.set_fact:
+    deploy_migration_signature_components: []
+
+- name: Add migration files to the signature
+  ansible.builtin.set_fact:
+    deploy_migration_signature_components: >-
+      {{
+        deploy_migration_signature_components
+        + [(item.path | basename) ~ ':' ~ item.checksum]
+      }}
+  loop: "{{ deploy_migration_files.files | sort(attribute='path') }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+
+- name: Build the desired migration signature
+  ansible.builtin.set_fact:
+    deploy_migration_signature: >-
+      {{
+        (
+          [deploy_migration_image, deploy_image, deploy_db_url]
+          + deploy_migration_signature_components
+        )
+        | join('|')
+        | hash('sha256')
+      }}
+
+- name: Install the migration environment file
+  ansible.builtin.template:
+    src: migration.env.j2
+    dest: "{{ deploy_migration_env_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  register: deploy_migration_env_result
+  no_log: true
+  diff: false
+
+- name: Inspect the migration container
+  community.docker.docker_container_info:
+    name: "{{ deploy_migration_container_name }}"
+  register: deploy_migration_container_info
+  no_log: true
+
+- name: Read the existing migration state
+  ansible.builtin.set_fact:
+    deploy_migration_existing_exit_code: >-
+      {{
+        (deploy_migration_container_info.container | default({}, true))
+        .get('State', {}).get('ExitCode', 1)
+      }}
+    deploy_migration_existing_image: >-
+      {{
+        (deploy_migration_container_info.container | default({}, true))
+        .get('Config', {}).get('Image', '')
+      }}
+    deploy_migration_existing_labels: >-
+      {{
+        (deploy_migration_container_info.container | default({}, true))
+        .get('Config', {}).get('Labels', {}) | default({}, true)
+      }}
+  no_log: true
+
+- name: Determine whether database migrations are required
+  ansible.builtin.set_fact:
+    deploy_migration_required: >-
+      {{
+        not deploy_migration_container_info.exists
+        or (deploy_migration_existing_exit_code | int) != 0
+        or deploy_migration_existing_image != deploy_migration_image
+        or deploy_migration_existing_labels.get(
+          deploy_migration_signature_label, ''
+        ) != deploy_migration_signature
+        or deploy_migration_env_result.changed
+      }}
+  no_log: true
+
+- name: Apply database migrations when required
+  community.docker.docker_container:
+    name: "{{ deploy_migration_container_name }}"
+    image: "{{ deploy_migration_image }}"
+    command: migrate
+    state: started
+    recreate: "{{ deploy_migration_container_info.exists }}"
+    pull: missing
+    detach: false
+    cleanup: false
+    restart_policy: "no"
+    labels: >-
+      {{
+        {
+          deploy_migration_signature_label: deploy_migration_signature
+        }
+      }}
+    volumes:
+      - "{{ deploy_migration_dir }}:/flyway/sql:ro"
+    env_file: "{{ deploy_migration_env_file }}"
+  when: deploy_migration_required
+  no_log: true
+
+- name: Install the application logging configuration
+  ansible.builtin.copy:
+    src: logback-spring.xml
+    dest: "{{ deploy_logging_config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: deploy_log_config_result
+
+- name: Install the application environment file
+  ansible.builtin.template:
+    src: application.env.j2
+    dest: "{{ deploy_application_env_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  register: deploy_application_env_result
+  no_log: true
+  diff: false
+
+- name: Start or update the application container
+  community.docker.docker_container:
+    name: "{{ deploy_container_name }}"
+    image: "{{ deploy_image }}"
+    state: started
+    recreate: >-
+      {{
+        deploy_application_env_result.changed
+        or deploy_log_config_result.changed
+      }}
+    pull: missing
+    detach: true
+    restart_policy: unless-stopped
+    stop_timeout: "{{ deploy_container_stop_timeout }}"
+    published_ports: "{{ deploy_container_published_ports }}"
+    volumes: "{{ deploy_container_volumes }}"
+    env_file: "{{ deploy_application_env_file }}"
+    comparisons:
+      env: strict
+      volumes: strict
+  no_log: true
+
+- name: Wait for the application to become ready
+  ansible.builtin.uri:
+    url: "{{ deploy_readiness_url }}"
+    method: GET
+    status_code: 200
+    timeout: 5
+  register: deploy_readiness_check
+  until: (deploy_readiness_check.status | default(0)) == 200
+  retries: "{{ deploy_readiness_retries }}"
+  delay: "{{ deploy_readiness_delay }}"
+  changed_when: false

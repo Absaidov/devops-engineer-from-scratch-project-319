@@ -1,0 +1,13 @@
+{{ nginx_json_error_log_path }} {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0640 syslog adm
+    sharedscripts
+    postrotate
+        systemctl kill --signal=HUP rsyslog.service >/dev/null 2>&1 || true
+    endscript
+}
