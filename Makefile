@@ -42,9 +42,13 @@ K8S_DIR ?= k8s
 K8S_NAMESPACE ?= bulletins
 K8S_DEPLOYMENT ?= bulletins
 K8S_SERVICE ?= bulletins
+K8S_PUBLIC_SERVICE ?= bulletins-public
 K8S_IMAGE_REPOSITORY ?= cr.yandex/crphrkv4imihhuukiv7q/project-devops-deploy
 K8S_IMAGE_TAG ?= a100ed36995989034cee26c2cfd9e1558201bdaa
 K8S_IMAGE ?= $(K8S_IMAGE_REPOSITORY):$(K8S_IMAGE_TAG)
+K8S_NEW_IMAGE ?=
+K8S_PUBLIC_CHECK_REQUESTS ?= 20
+K8S_DISTRIBUTION_REQUESTS ?= 60
 K8S_ROLLOUT_TIMEOUT ?= 300s
 
 export ANSIBLE_CONFIG := $(abspath $(ANSIBLE_CONFIG_FILE))
@@ -59,7 +63,8 @@ export ANSIBLE_HOME := $(abspath .ansible)
 	grafana-alert-test-reset \
 	terraform-fmt terraform-init terraform-validate terraform-plan \
 	terraform-apply terraform-output terraform-kubeconfig terraform-destroy \
-	k8s-secret k8s-deploy k8s-status k8s-check k8s-port-forward k8s-logs
+	k8s-secret k8s-deploy k8s-status k8s-check k8s-public-url \
+	k8s-public-check k8s-rollout-check k8s-port-forward k8s-logs
 
 install:
 	$(PYTHON) -m venv $(VENV_DIR)
@@ -212,14 +217,24 @@ k8s-deploy: k8s-secret
 	$(KUBECTL) apply --filename $(K8S_DIR)/configmap.yaml
 	$(KUBECTL) apply --filename $(K8S_DIR)/migration-configmap.yaml
 	$(KUBECTL) apply --filename $(K8S_DIR)/service.yaml
-	$(KUBECTL) apply --filename $(K8S_DIR)/deployment.yaml
-	$(KUBECTL) --namespace $(K8S_NAMESPACE) set image \
-		deployment/$(K8S_DEPLOYMENT) application="$(K8S_IMAGE)"
+	$(KUBECTL) apply --filename $(K8S_DIR)/load-balancer.yaml
+	$(KUBECTL) apply --filename $(K8S_DIR)/pod-disruption-budget.yaml
+	@set -eu; \
+		rendered_file="$$(mktemp "$${TMPDIR:-/tmp}/project-319-deployment.XXXXXX")"; \
+		trap 'rm -f "$$rendered_file"' EXIT INT TERM; \
+		$(KUBECTL) set image --filename $(K8S_DIR)/deployment.yaml \
+			application="$(K8S_IMAGE)" --local --output yaml >"$$rendered_file"; \
+		if [ ! -s "$$rendered_file" ]; then \
+			cp $(K8S_DIR)/deployment.yaml "$$rendered_file"; \
+		fi; \
+		$(KUBECTL) apply --filename "$$rendered_file"
 	$(KUBECTL) --namespace $(K8S_NAMESPACE) rollout status \
 		deployment/$(K8S_DEPLOYMENT) --timeout=$(K8S_ROLLOUT_TIMEOUT)
 
 k8s-status:
-	$(KUBECTL) --namespace $(K8S_NAMESPACE) get deployment,pods,service --output wide
+	$(KUBECTL) get nodes --output wide
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) get \
+		deployment,pods,service,poddisruptionbudget --output wide
 	$(KUBECTL) --namespace $(K8S_NAMESPACE) rollout status \
 		deployment/$(K8S_DEPLOYMENT) --timeout=10s
 
@@ -247,6 +262,31 @@ k8s-check:
 		curl --fail --silent --show-error http://127.0.0.1:19090/actuator/health/readiness; \
 		echo; \
 		echo "Application API and readiness endpoint are available."
+
+k8s-public-url:
+	@KUBECTL="$(KUBECTL)" \
+		K8S_NAMESPACE="$(K8S_NAMESPACE)" \
+		K8S_PUBLIC_SERVICE="$(K8S_PUBLIC_SERVICE)" \
+		K8S_PUBLIC_CHECK_REQUESTS=0 \
+		$(K8S_DIR)/public-check.sh
+
+k8s-public-check:
+	@KUBECTL="$(KUBECTL)" \
+		K8S_NAMESPACE="$(K8S_NAMESPACE)" \
+		K8S_PUBLIC_SERVICE="$(K8S_PUBLIC_SERVICE)" \
+		K8S_PUBLIC_CHECK_REQUESTS="$(K8S_PUBLIC_CHECK_REQUESTS)" \
+		$(K8S_DIR)/public-check.sh
+
+k8s-rollout-check:
+	@KUBECTL="$(KUBECTL)" \
+		K8S_NAMESPACE="$(K8S_NAMESPACE)" \
+		K8S_DEPLOYMENT="$(K8S_DEPLOYMENT)" \
+		K8S_SERVICE="$(K8S_SERVICE)" \
+		K8S_PUBLIC_SERVICE="$(K8S_PUBLIC_SERVICE)" \
+		K8S_NEW_IMAGE="$(K8S_NEW_IMAGE)" \
+		K8S_DISTRIBUTION_REQUESTS="$(K8S_DISTRIBUTION_REQUESTS)" \
+		K8S_ROLLOUT_TIMEOUT="$(K8S_ROLLOUT_TIMEOUT)" \
+		$(K8S_DIR)/rolling-update-check.sh
 
 k8s-port-forward:
 	$(KUBECTL) --namespace $(K8S_NAMESPACE) port-forward \

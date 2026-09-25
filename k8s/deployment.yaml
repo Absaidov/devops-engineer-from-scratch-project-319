@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/name: bulletins
     app.kubernetes.io/component: application
 spec:
-  replicas: 1
+  replicas: 2
   revisionHistoryLimit: 3
   minReadySeconds: 10
   progressDeadlineSeconds: 300
@@ -27,6 +27,24 @@ spec:
         app.kubernetes.io/component: application
     spec:
       terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: bulletins
+                  app.kubernetes.io/component: application
+              matchLabelKeys:
+                - pod-template-hash
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: bulletins
+              app.kubernetes.io/component: application
       initContainers:
         - name: migration
           image: flyway/flyway:13.4.0-alpine
@@ -102,6 +120,13 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 5
           resources:
             requests:
               cpu: 250m

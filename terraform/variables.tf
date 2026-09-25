@@ -77,11 +77,11 @@ variable "service_ipv4_range" {
 variable "node_count" {
   description = "Fixed number of worker nodes."
   type        = number
-  default     = 1
+  default     = 2
 
   validation {
-    condition     = var.node_count >= 1
-    error_message = "node_count must be at least 1."
+    condition     = var.node_count >= 2
+    error_message = "node_count must be at least 2 for zero-downtime releases."
   }
 }
 

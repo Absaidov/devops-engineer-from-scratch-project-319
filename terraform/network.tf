@@ -49,8 +49,16 @@ resource "yandex_vpc_security_group" "kubernetes" {
 
   ingress {
     protocol          = "TCP"
-    description       = "Network load balancer health checks"
+    description       = "Kubernetes load balancer health checks"
     predefined_target = "loadbalancer_healthchecks"
+    port              = 10256
+  }
+
+  ingress {
+    protocol       = "TCP"
+    description    = "Public HTTP traffic to the application NodePort"
+    v4_cidr_blocks = ["0.0.0.0/0"]
+    port           = 30080
   }
 
   ingress {

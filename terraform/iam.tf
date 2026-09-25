@@ -28,6 +28,12 @@ resource "yandex_resourcemanager_folder_iam_member" "kubernetes_cluster_public_n
   member    = "serviceAccount:${yandex_iam_service_account.kubernetes_cluster.id}"
 }
 
+resource "yandex_resourcemanager_folder_iam_member" "kubernetes_cluster_load_balancer" {
+  folder_id = var.folder_id
+  role      = "load-balancer.admin"
+  member    = "serviceAccount:${yandex_iam_service_account.kubernetes_cluster.id}"
+}
+
 resource "yandex_resourcemanager_folder_iam_member" "kubernetes_nodes_image_puller" {
   folder_id = var.folder_id
   role      = "container-registry.images.puller"

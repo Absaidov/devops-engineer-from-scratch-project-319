@@ -30,6 +30,7 @@ resource "yandex_kubernetes_cluster" "application" {
 
   depends_on = [
     yandex_resourcemanager_folder_iam_member.kubernetes_cluster_agent,
+    yandex_resourcemanager_folder_iam_member.kubernetes_cluster_load_balancer,
     yandex_resourcemanager_folder_iam_member.kubernetes_cluster_public_network,
     yandex_resourcemanager_folder_iam_member.kubernetes_nodes_image_puller,
   ]

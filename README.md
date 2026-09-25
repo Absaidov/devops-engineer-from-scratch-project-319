@@ -7,18 +7,18 @@
 На текущем этапе Terraform создаёт в Yandex Cloud:
 
 - VPC, приватную подсеть, NAT gateway и таблицу маршрутизации;
-- Managed Service for Kubernetes с одним worker-узлом;
+- Managed Service for Kubernetes с двумя worker-узлами;
 - Managed Service for PostgreSQL без публичного IP;
 - приватный Object Storage bucket и сервисный аккаунт приложения;
 - Lockbox-секрет с параметрами PostgreSQL и Object Storage.
 
 ```text
 Internet ── trusted /32 ──> Kubernetes API
-                              │
-private subnet + NAT ──> worker node ──> Object Storage
-                              │
-                              └────────> PostgreSQL :6432
-                                           (только от SG Kubernetes)
+Internet ──> Network Load Balancer :80 ──> worker nodes :30080
+                                                │
+private subnet + NAT ───────────────────────────┼──> Object Storage
+                                                └──> PostgreSQL :6432
+                                                     (только от SG Kubernetes)
 ```
 
 Terraform-конфигурация находится в каталоге [`terraform`](terraform/).
@@ -206,6 +206,9 @@ PostgreSQL не имеет публичного IP и принимает TCP/643
 | Назначение | Порт | Доступ |
 |---|---:|---|
 | Kubernetes API | TCP 443, 6443 | только `admin_cidrs` |
+| Публичное приложение | TCP 80 | через Network Load Balancer |
+| HTTP NodePort приложения | TCP 30080 | входящий трафик балансировщика к worker-узлам |
+| Проверка worker-узлов балансировщиком | TCP 10256 | только `loadbalancer_healthchecks` Yandex Cloud |
 | PostgreSQL | TCP 6432 | только security group Kubernetes |
 | Worker egress | любой | наружу через NAT gateway |
 | Object Storage | HTTPS 443 | по статическому ключу сервисного аккаунта |
@@ -224,16 +227,25 @@ k8s/
 ├── migration-configmap.yaml
 ├── deployment.yaml
 ├── service.yaml
-└── sync-secret.sh
+├── load-balancer.yaml
+├── pod-disruption-budget.yaml
+├── sync-secret.sh
+├── public-check.sh
+└── rolling-update-check.sh
 ```
 
-Deployment запускает одну реплику приложения с `RollingUpdate`
+Deployment запускает две реплики приложения с `RollingUpdate`
 (`maxUnavailable: 0`, `maxSurge: 1`): при обновлении сначала поднимается новый
 pod, а старый удаляется только после его готовности. Настроены resource
 requests/limits и проверки `startup`, `readiness`, `liveness` на
 management-порту `9090`. Перед каждым новым pod init-контейнер Flyway
-идемпотентно применяет SQL-миграции. Service имеет тип `ClusterIP` и публикует
-внутри кластера порты `80` и `9090`.
+идемпотентно применяет SQL-миграции. `topologySpreadConstraints` и обязательная
+pod anti-affinity по `pod-template-hash` размещают реплики одной ревизии на
+разных worker-узлах, не блокируя RollingUpdate между ревизиями.
+PodDisruptionBudget сохраняет минимум одну доступную реплику при добровольном
+disruption. Внутренний Service `bulletins` имеет тип `ClusterIP` и публикует
+порты `80` и `9090`; отдельный Service `bulletins-public` публикует только
+HTTP/80 через Yandex Network Load Balancer.
 
 ### Подключение kubectl
 
@@ -298,12 +310,15 @@ Secret напрямую через stdin. Секретный payload не зап
 make k8s-deploy
 make k8s-status
 make k8s-check
+make k8s-public-check
 ```
 
 `make k8s-deploy` создаёт namespace `bulletins`, синхронизирует Secret,
-применяет ConfigMap, миграцию, Deployment и Service, а затем ждёт успешный
-rollout. `make k8s-check` временно открывает локальные порты и проверяет REST
-API и readiness endpoint.
+применяет ConfigMap, миграцию, внутренний и публичный Service, PDB и Deployment,
+а затем ждёт успешный rollout. `make k8s-check` временно открывает локальные
+порты и проверяет REST API и readiness endpoint. Создание внешнего адреса
+балансировщика занимает несколько минут; `make k8s-public-check` дожидается
+адреса и выполняет серию запросов к публичному REST endpoint.
 
 Чтобы проверить приложение вручную, оставьте следующую команду работающей:
 
@@ -323,6 +338,7 @@ curl --fail http://127.0.0.1:9090/actuator/health/readiness
 ```bash
 make k8s-status
 make k8s-logs
+make k8s-public-url
 ```
 
 Для выката нового immutable image укажите полный Git SHA из CI приложения:
@@ -330,6 +346,65 @@ make k8s-logs
 ```bash
 make k8s-deploy K8S_IMAGE_TAG=<40-символьный-Git-SHA>
 ```
+
+## Масштабирование, балансировка и zero-downtime релизы
+
+Для этого этапа `node_count` равен `2`. Сначала примените Terraform и убедитесь,
+что план содержит только ожидаемое масштабирование node group, новую IAM-роль
+`load-balancer.admin`, публичный TCP/30080 и TCP/10256 только для health checks;
+замен и удалений быть не должно:
+
+```bash
+export YC_TOKEN="$(yc iam create-token)"
+make terraform-plan
+make terraform-apply
+kubectl get nodes -o wide
+```
+
+Продолжайте только после появления двух узлов со статусом `Ready`. Затем
+примените Kubernetes-ресурсы и дождитесь публичного адреса:
+
+```bash
+make k8s-deploy
+make k8s-status
+make k8s-public-check
+kubectl --namespace bulletins get service bulletins-public
+```
+
+Yandex Cloud автоматически создаёт Network Load Balancer для Service типа
+`LoadBalancer`. Его внешний IP динамический, а сам балансировщик тарифицируется.
+Созданный Kubernetes ресурсами балансировщик не следует изменять вручную в
+консоли: его жизненным циклом управляет Service `bulletins-public`.
+
+Для проверки безостановочного обновления уже опубликованного образа выполните
+rolling restart. Команда не требует сборки фиктивной версии приложения:
+
+```bash
+make k8s-rollout-check
+```
+
+Скрипт сохраняет текущий immutable image, запускает новую ревизию Deployment и
+проверяет, что все pod были заменены. Когда действительно опубликована новая
+версия приложения, тот же тест можно запустить с её полным Git SHA:
+
+```bash
+make k8s-rollout-check \
+  K8S_NEW_IMAGE="cr.yandex/crphrkv4imihhuukiv7q/project-devops-deploy:<новый-Git-SHA>"
+```
+
+Проверка требует две Ready-реплики, два service endpoint и размещение pod на
+двух разных нодах. Во время `RollingUpdate` она непрерывно обращается к
+`/api/bulletins`, после чего выводит общее число запросов, ошибок и ответов 5xx.
+Через Actuator-метрику `http_server_requests_seconds_count` дополнительно
+проверяется прирост счётчика после отдельной серии из 60 запросов: трафик должен
+получить каждый новый pod, без перекоса сильнее 4:1. В режиме нового образа
+дополнительно проверяется изменение digest. Успешный результат содержит
+`failed=0, 5xx=0`. При ошибке скрипт печатает команду `kubectl rollout undo`.
+После реального обновления образа зафиксируйте новый SHA в
+`k8s/deployment.yaml` и значение по умолчанию `K8S_IMAGE_TAG` в `Makefile`.
+
+HPA на этом шаге намеренно не включён: он опционален, а учебная конфигурация
+фиксирует две реплики, чтобы проверка распределения и PDB была воспроизводимой.
 
 JDBC-соединение первичного учебного деплоя использует TLS с
 `sslmode=require`. PostgreSQL закрыт от публичной сети и доступен только из

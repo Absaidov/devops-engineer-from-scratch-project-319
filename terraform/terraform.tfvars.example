@@ -9,9 +9,9 @@ zone         = "ru-central1-a"
 project_name = "project-319"
 environment  = "production"
 
-# Defaults create one worker (2 vCPU, 4 GiB RAM, 64 GiB network-hdd)
+# Defaults create two workers (2 vCPU, 4 GiB RAM, 64 GiB network-hdd each)
 # and one small Managed PostgreSQL host. Override only when necessary.
-node_count                    = 1
+node_count                    = 2
 postgresql_resource_preset_id = "b1.medium"
 
 # Optional. When omitted, Terraform generates a globally unique bucket name.
