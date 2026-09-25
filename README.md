@@ -212,6 +212,130 @@ PostgreSQL не имеет публичного IP и принимает TCP/643
 
 Worker не получает публичный IP. Object Storage закрыт для анонимного чтения, просмотра списка и чтения конфигурации.
 
+## Kubernetes-манифесты и первичный деплой
+
+Манифесты приложения находятся в каталоге [`k8s`](k8s/):
+
+```text
+k8s/
+├── namespace.yaml
+├── configmap.yaml
+├── secret.example.yaml
+├── migration-configmap.yaml
+├── deployment.yaml
+├── service.yaml
+└── sync-secret.sh
+```
+
+Deployment запускает одну реплику приложения с `RollingUpdate`
+(`maxUnavailable: 0`, `maxSurge: 1`): при обновлении сначала поднимается новый
+pod, а старый удаляется только после его готовности. Настроены resource
+requests/limits и проверки `startup`, `readiness`, `liveness` на
+management-порту `9090`. Перед каждым новым pod init-контейнер Flyway
+идемпотентно применяет SQL-миграции. Service имеет тип `ClusterIP` и публикует
+внутри кластера порты `80` и `9090`.
+
+### Подключение kubectl
+
+При прямой доступности Kubernetes API достаточно выполнить:
+
+```bash
+make terraform-kubeconfig
+kubectl get nodes
+```
+
+Если провайдер блокирует прямое соединение с публичным API, используйте
+доверенную jump host, чей публичный адрес добавлен в `admin_cidrs`. В первом
+терминале оставьте SSH-туннель запущенным:
+
+```bash
+export K8S_API_IP="$(
+  terraform -chdir=terraform output -raw kubernetes_api_endpoint \
+    | sed 's#https://##'
+)"
+export BASTION_IP="<публичный-IP-jump-host>"
+
+ssh -N -L "127.0.0.1:8443:${K8S_API_IP}:443" "ubuntu@${BASTION_IP}"
+```
+
+Во втором терминале подготовьте отдельный kubeconfig, не меняя основной:
+
+```bash
+cp ~/.kube/config /tmp/project-319-kubeconfig
+export KUBECONFIG=/tmp/project-319-kubeconfig
+export K8S_API_IP="$(
+  terraform -chdir=terraform output -raw kubernetes_api_endpoint \
+    | sed 's#https://##'
+)"
+export K8S_CLUSTER_NAME="$(
+  kubectl config view --minify -o jsonpath='{.contexts[0].context.cluster}'
+)"
+
+kubectl config set-cluster "$K8S_CLUSTER_NAME" \
+  --server=https://127.0.0.1:8443 \
+  --tls-server-name="$K8S_API_IP"
+kubectl get nodes
+```
+
+Туннель должен оставаться открытым во время всех последующих команд `kubectl`.
+
+### Secret и развёртывание
+
+[`k8s/secret.example.yaml`](k8s/secret.example.yaml) описывает только схему
+Secret и не содержит рабочих значений. Base64 в Kubernetes не является
+шифрованием, поэтому настоящие DB/S3 credentials остаются в Lockbox.
+
+Команда `make k8s-secret` находит Lockbox `project-319-application` через YC
+CLI, перекладывает поля `DB_*`/`S3_*` в переменные приложения и применяет
+Secret напрямую через stdin. Секретный payload не записывается в репозиторий
+или локальный файл. При другом имени Lockbox задайте переменную
+`K8S_LOCKBOX_SECRET_NAME`; также можно передать его ID через
+`K8S_LOCKBOX_SECRET_ID`.
+
+Для полного первичного деплоя выполните из корня репозитория:
+
+```bash
+make k8s-deploy
+make k8s-status
+make k8s-check
+```
+
+`make k8s-deploy` создаёт namespace `bulletins`, синхронизирует Secret,
+применяет ConfigMap, миграцию, Deployment и Service, а затем ждёт успешный
+rollout. `make k8s-check` временно открывает локальные порты и проверяет REST
+API и readiness endpoint.
+
+Чтобы проверить приложение вручную, оставьте следующую команду работающей:
+
+```bash
+make k8s-port-forward
+```
+
+В другом терминале выполните:
+
+```bash
+curl --fail http://127.0.0.1:8080/api/bulletins
+curl --fail http://127.0.0.1:9090/actuator/health/readiness
+```
+
+Логи и состояние доступны командами:
+
+```bash
+make k8s-status
+make k8s-logs
+```
+
+Для выката нового immutable image укажите полный Git SHA из CI приложения:
+
+```bash
+make k8s-deploy K8S_IMAGE_TAG=<40-символьный-Git-SHA>
+```
+
+JDBC-соединение первичного учебного деплоя использует TLS с
+`sslmode=require`. PostgreSQL закрыт от публичной сети и доступен только из
+security group Kubernetes. Для перехода на `verify-full` необходимо отдельно
+смонтировать в pod корневой CA Yandex Cloud и указать `sslrootcert`.
+
 ## Удаление инфраструктуры
 
 Перед удалением очистите application bucket, если в нём появились объекты: `force_destroy` намеренно выключен.

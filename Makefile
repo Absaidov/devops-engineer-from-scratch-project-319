@@ -37,6 +37,15 @@ TERRAFORM_DIR ?= terraform
 TF_VAR_FILE ?= terraform.tfvars
 TF_PLAN_FILE ?= project-319.tfplan
 TF_STATE_BUCKET ?=
+KUBECTL ?= kubectl
+K8S_DIR ?= k8s
+K8S_NAMESPACE ?= bulletins
+K8S_DEPLOYMENT ?= bulletins
+K8S_SERVICE ?= bulletins
+K8S_IMAGE_REPOSITORY ?= cr.yandex/crphrkv4imihhuukiv7q/project-devops-deploy
+K8S_IMAGE_TAG ?= a100ed36995989034cee26c2cfd9e1558201bdaa
+K8S_IMAGE ?= $(K8S_IMAGE_REPOSITORY):$(K8S_IMAGE_TAG)
+K8S_ROLLOUT_TIMEOUT ?= 300s
 
 export ANSIBLE_CONFIG := $(abspath $(ANSIBLE_CONFIG_FILE))
 export ANSIBLE_HOME := $(abspath .ansible)
@@ -49,7 +58,8 @@ export ANSIBLE_HOME := $(abspath .ansible)
 	grafana-logs grafana-alerting-check grafana-alert-test \
 	grafana-alert-test-reset \
 	terraform-fmt terraform-init terraform-validate terraform-plan \
-	terraform-apply terraform-output terraform-kubeconfig terraform-destroy
+	terraform-apply terraform-output terraform-kubeconfig terraform-destroy \
+	k8s-secret k8s-deploy k8s-status k8s-check k8s-port-forward k8s-logs
 
 install:
 	$(PYTHON) -m venv $(VENV_DIR)
@@ -192,3 +202,56 @@ terraform-destroy:
 	@test -f "$(TERRAFORM_DIR)/$(TF_VAR_FILE)" || { echo "Missing terraform/$(TF_VAR_FILE)"; exit 1; }
 	@test -n "$$YC_TOKEN" || { echo "Set YC_TOKEN with: export YC_TOKEN=\"$$(yc iam create-token)\""; exit 1; }
 	$(TERRAFORM) -chdir=$(TERRAFORM_DIR) destroy -var-file="$(TF_VAR_FILE)"
+
+k8s-secret:
+	$(KUBECTL) apply --filename $(K8S_DIR)/namespace.yaml
+	KUBECTL="$(KUBECTL)" K8S_NAMESPACE="$(K8S_NAMESPACE)" \
+		$(K8S_DIR)/sync-secret.sh
+
+k8s-deploy: k8s-secret
+	$(KUBECTL) apply --filename $(K8S_DIR)/configmap.yaml
+	$(KUBECTL) apply --filename $(K8S_DIR)/migration-configmap.yaml
+	$(KUBECTL) apply --filename $(K8S_DIR)/service.yaml
+	$(KUBECTL) apply --filename $(K8S_DIR)/deployment.yaml
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) set image \
+		deployment/$(K8S_DEPLOYMENT) application="$(K8S_IMAGE)"
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) rollout status \
+		deployment/$(K8S_DEPLOYMENT) --timeout=$(K8S_ROLLOUT_TIMEOUT)
+
+k8s-status:
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) get deployment,pods,service --output wide
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) rollout status \
+		deployment/$(K8S_DEPLOYMENT) --timeout=10s
+
+k8s-check:
+	@set -eu; \
+		log_file="$${TMPDIR:-/tmp}/project-319-k8s-port-forward.log"; \
+		$(KUBECTL) --namespace $(K8S_NAMESPACE) port-forward \
+			service/$(K8S_SERVICE) 18080:80 19090:9090 >"$$log_file" 2>&1 & \
+		forward_pid=$$!; \
+		trap 'kill "$$forward_pid" 2>/dev/null || true; wait "$$forward_pid" 2>/dev/null || true' EXIT INT TERM; \
+		ready=0; \
+		for attempt in $$(seq 1 30); do \
+			if curl --fail --silent --output /dev/null \
+				http://127.0.0.1:19090/actuator/health/readiness; then \
+				ready=1; \
+				break; \
+			fi; \
+			sleep 1; \
+		done; \
+		if [ "$$ready" -ne 1 ]; then \
+			cat "$$log_file"; \
+			exit 1; \
+		fi; \
+		curl --fail --silent --show-error http://127.0.0.1:18080/api/bulletins >/dev/null; \
+		curl --fail --silent --show-error http://127.0.0.1:19090/actuator/health/readiness; \
+		echo; \
+		echo "Application API and readiness endpoint are available."
+
+k8s-port-forward:
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) port-forward \
+		service/$(K8S_SERVICE) 8080:80 9090:9090
+
+k8s-logs:
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) logs \
+		deployment/$(K8S_DEPLOYMENT) --all-pods=true --tail=100

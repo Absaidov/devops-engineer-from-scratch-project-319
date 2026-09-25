@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bulletins
+  namespace: bulletins
+  labels:
+    app.kubernetes.io/name: bulletins
+    app.kubernetes.io/component: application
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  minReadySeconds: 10
+  progressDeadlineSeconds: 300
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bulletins
+      app.kubernetes.io/component: application
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bulletins
+        app.kubernetes.io/component: application
+    spec:
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: migration
+          image: flyway/flyway:13.4.0-alpine
+          imagePullPolicy: IfNotPresent
+          args:
+            - migrate
+          env:
+            - name: FLYWAY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: bulletins-secrets
+                  key: SPRING_DATASOURCE_URL
+            - name: FLYWAY_USER
+              valueFrom:
+                secretKeyRef:
+                  name: bulletins-secrets
+                  key: SPRING_DATASOURCE_USERNAME
+            - name: FLYWAY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: bulletins-secrets
+                  key: SPRING_DATASOURCE_PASSWORD
+          volumeMounts:
+            - name: migrations
+              mountPath: /flyway/sql
+              readOnly: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      containers:
+        - name: application
+          image: cr.yandex/crphrkv4imihhuukiv7q/project-devops-deploy:a100ed36995989034cee26c2cfd9e1558201bdaa
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: bulletins-config
+            - secretRef:
+                name: bulletins-secrets
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: management
+              containerPort: 9090
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: management
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: migrations
+          configMap:
+            name: bulletins-migrations
