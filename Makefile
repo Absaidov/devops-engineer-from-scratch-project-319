@@ -50,6 +50,14 @@ K8S_NEW_IMAGE ?=
 K8S_PUBLIC_CHECK_REQUESTS ?= 20
 K8S_DISTRIBUTION_REQUESTS ?= 60
 K8S_ROLLOUT_TIMEOUT ?= 300s
+HELM ?= helm
+K8S_OBSERVABILITY_DIR ?= $(K8S_DIR)/observability
+PROMETHEUS_NAMESPACE ?= prometheus-operator-space
+PROMETHEUS_CHART_VERSION ?= 88.5.2-1
+PROMETHEUS_WORKSPACE_ID ?=
+APPLICATION_LOG_GROUP_NAME ?= project-319-application-logs
+MONITORING_DIR ?= monitoring
+MONITORING_NOTIFICATION_CHANNEL ?=
 
 export ANSIBLE_CONFIG := $(abspath $(ANSIBLE_CONFIG_FILE))
 export ANSIBLE_HOME := $(abspath .ansible)
@@ -64,7 +72,12 @@ export ANSIBLE_HOME := $(abspath .ansible)
 	terraform-fmt terraform-init terraform-validate terraform-plan \
 	terraform-apply terraform-output terraform-kubeconfig terraform-destroy \
 	k8s-secret k8s-deploy k8s-status k8s-check k8s-public-url \
-	k8s-public-check k8s-rollout-check k8s-port-forward k8s-logs
+	k8s-public-check k8s-rollout-check k8s-port-forward k8s-logs \
+	k8s-observability-deploy k8s-observability-status \
+	k8s-observability-check k8s-observability-logs \
+	k8s-observability-cloud-logs k8s-observability-alertmanager \
+	k8s-observability-alert-test \
+	k8s-observability-alert-test-reset
 
 install:
 	$(PYTHON) -m venv $(VENV_DIR)
@@ -228,6 +241,18 @@ k8s-deploy: k8s-secret
 			cp $(K8S_DIR)/deployment.yaml "$$rendered_file"; \
 		fi; \
 		$(KUBECTL) apply --filename "$$rendered_file"
+	@set -eu; \
+		config_revision="$$( \
+			$(KUBECTL) --namespace $(K8S_NAMESPACE) get \
+				configmap/bulletins-config \
+				configmap/bulletins-migrations \
+				secret/bulletins-secrets \
+				--output jsonpath='{range .items[*]}{.metadata.uid}:{.metadata.resourceVersion};{end}' \
+		)"; \
+		$(KUBECTL) --namespace $(K8S_NAMESPACE) patch \
+			deployment/$(K8S_DEPLOYMENT) --type merge \
+			--patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"project-319.hexlet.io/config-revision\":\"$$config_revision\"}}}}}" \
+			--output name
 	$(KUBECTL) --namespace $(K8S_NAMESPACE) rollout status \
 		deployment/$(K8S_DEPLOYMENT) --timeout=$(K8S_ROLLOUT_TIMEOUT)
 
@@ -295,3 +320,55 @@ k8s-port-forward:
 k8s-logs:
 	$(KUBECTL) --namespace $(K8S_NAMESPACE) logs \
 		deployment/$(K8S_DEPLOYMENT) --all-pods=true --tail=100
+
+k8s-observability-deploy: k8s-deploy
+	KUBECTL="$(KUBECTL)" HELM="$(HELM)" TERRAFORM="$(TERRAFORM)" \
+		TERRAFORM_DIR="$(TERRAFORM_DIR)" \
+		K8S_OBSERVABILITY_DIR="$(K8S_OBSERVABILITY_DIR)" \
+		PROMETHEUS_NAMESPACE="$(PROMETHEUS_NAMESPACE)" \
+		PROMETHEUS_CHART_VERSION="$(PROMETHEUS_CHART_VERSION)" \
+		PROMETHEUS_WORKSPACE_ID="$(PROMETHEUS_WORKSPACE_ID)" \
+		APPLICATION_LOG_GROUP_NAME="$(APPLICATION_LOG_GROUP_NAME)" \
+		bash $(K8S_OBSERVABILITY_DIR)/deploy.sh
+
+k8s-observability-status:
+	$(KUBECTL) --namespace $(PROMETHEUS_NAMESPACE) get pods --output wide
+	$(KUBECTL) --namespace logging get daemonset,pods --output wide
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) get servicemonitor,prometheusrule
+
+k8s-observability-check:
+	KUBECTL="$(KUBECTL)" TERRAFORM="$(TERRAFORM)" \
+		TERRAFORM_DIR="$(TERRAFORM_DIR)" \
+		PROMETHEUS_NAMESPACE="$(PROMETHEUS_NAMESPACE)" \
+		PROMETHEUS_WORKSPACE_ID="$(PROMETHEUS_WORKSPACE_ID)" \
+		APPLICATION_LOG_GROUP_NAME="$(APPLICATION_LOG_GROUP_NAME)" \
+		bash $(K8S_OBSERVABILITY_DIR)/check.sh
+
+k8s-observability-logs:
+	$(KUBECTL) --namespace logging logs daemonset/fluent-bit --tail=100
+
+k8s-observability-cloud-logs:
+	@group_id="$$( $(TERRAFORM) -chdir=$(TERRAFORM_DIR) output \
+		-raw application_log_group_id 2>/dev/null || true )"; \
+	if [ -z "$$group_id" ]; then \
+		group_id="$$(yc logging group get \
+			--name "$(APPLICATION_LOG_GROUP_NAME)" --format json | jq -er '.id')"; \
+	fi; \
+		yc logging read --group-id "$$group_id" --since 1h \
+			--filter 'resource_type = "bulletins"' --limit 20
+
+k8s-observability-alertmanager:
+	TERRAFORM="$(TERRAFORM)" TERRAFORM_DIR="$(TERRAFORM_DIR)" \
+		MONITORING_DIR="$(MONITORING_DIR)" \
+		PROMETHEUS_WORKSPACE_ID="$(PROMETHEUS_WORKSPACE_ID)" \
+		MONITORING_NOTIFICATION_CHANNEL="$(MONITORING_NOTIFICATION_CHANNEL)" \
+		bash $(MONITORING_DIR)/upload-alertmanager.sh
+
+k8s-observability-alert-test:
+	$(KUBECTL) apply --filename $(K8S_OBSERVABILITY_DIR)/test-alert.yaml
+	@echo "Wait 3-5 minutes, confirm BulletinsManualNotificationTest is FIRING and the notification arrived."
+	@echo "Then run: make k8s-observability-alert-test-reset"
+
+k8s-observability-alert-test-reset:
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) delete \
+		prometheusrule bulletins-manual-test --ignore-not-found

@@ -1,0 +1,47 @@
+{
+  "title": "project-319: Application overview",
+  "data_source": "Managed Service for Prometheus",
+  "refresh": "30s",
+  "panels": [
+    {
+      "title": "Ready application pods",
+      "unit": "count",
+      "query": "sum(kube_pod_status_ready{namespace=\"bulletins\",condition=\"true\"})"
+    },
+    {
+      "title": "Application scrape status",
+      "unit": "short",
+      "query": "max(up{namespace=\"bulletins\",service=\"bulletins\"})"
+    },
+    {
+      "title": "CPU limit utilization",
+      "unit": "percent",
+      "query": "100 * sum(rate(container_cpu_usage_seconds_total{namespace=\"bulletins\",container=\"application\"}[5m])) / clamp_min(sum(kube_pod_container_resource_limits{namespace=\"bulletins\",container=\"application\",resource=\"cpu\",unit=\"core\"}), 0.001)"
+    },
+    {
+      "title": "Memory limit utilization",
+      "unit": "percent",
+      "query": "100 * sum(container_memory_working_set_bytes{namespace=\"bulletins\",container=\"application\"}) / clamp_min(sum(kube_pod_container_resource_limits{namespace=\"bulletins\",container=\"application\",resource=\"memory\",unit=\"byte\"}), 1)"
+    },
+    {
+      "title": "HTTP requests per second",
+      "unit": "reqps",
+      "query": "sum(rate(http_server_requests_seconds_count{namespace=\"bulletins\",uri!~\"/actuator.*\"}[5m]))"
+    },
+    {
+      "title": "HTTP 5xx ratio",
+      "unit": "percentunit",
+      "query": "(sum(rate(http_server_requests_seconds_count{namespace=\"bulletins\",status=~\"5..\",uri!~\"/actuator.*\"}[5m])) or vector(0)) / clamp_min(sum(rate(http_server_requests_seconds_count{namespace=\"bulletins\",uri!~\"/actuator.*\"}[5m])), 0.001)"
+    },
+    {
+      "title": "HTTP p95 latency",
+      "unit": "seconds",
+      "query": "histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{namespace=\"bulletins\",uri!~\"/actuator.*\"}[5m])))"
+    },
+    {
+      "title": "Container restarts",
+      "unit": "count",
+      "query": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"bulletins\",container=\"application\"}[1h]))"
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bulletins
+  namespace: bulletins
+  labels:
+    release: prometheus
+    app.kubernetes.io/name: bulletins
+    app.kubernetes.io/component: alerting
+spec:
+  groups:
+    - name: bulletins.availability
+      rules:
+        - alert: BulletinsMetricsUnavailable
+          expr: >-
+            absent(up{namespace="bulletins", service="bulletins"})
+            or max(up{namespace="bulletins", service="bulletins"}) == 0
+          for: 3m
+          labels:
+            service: bulletins
+            severity: critical
+          annotations:
+            summary: No application metrics are available
+            description: Prometheus cannot scrape any bulletins management endpoint for three minutes.
+
+        - alert: BulletinsReplicasUnavailable
+          expr: >-
+            kube_deployment_status_replicas_available{namespace="bulletins", deployment="bulletins"}
+            < kube_deployment_spec_replicas{namespace="bulletins", deployment="bulletins"}
+          for: 5m
+          labels:
+            service: bulletins
+            severity: critical
+          annotations:
+            summary: Application replicas are unavailable
+            description: At least one expected bulletins replica has been unavailable for five minutes.
+
+        - alert: BulletinsContainerRestarted
+          expr: >-
+            increase(kube_pod_container_status_restarts_total{namespace="bulletins", container="application"}[10m]) > 0
+          labels:
+            service: bulletins
+            severity: warning
+          annotations:
+            summary: Application container restarted
+            description: A bulletins application container restarted during the last ten minutes.
+
+    - name: bulletins.http
+      rules:
+        - alert: BulletinsHigh5xxRate
+          expr: >-
+            sum(rate(http_server_requests_seconds_count{namespace="bulletins", status=~"5..", uri!~"/actuator.*"}[5m]))
+            /
+            clamp_min(sum(rate(http_server_requests_seconds_count{namespace="bulletins", uri!~"/actuator.*"}[5m])), 0.001)
+            > 0.05
+          for: 5m
+          labels:
+            service: bulletins
+            severity: critical
+          annotations:
+            summary: More than five percent of application responses are 5xx
+            description: The five-minute 5xx ratio has stayed above 5% for five minutes.
+
+        - alert: BulletinsHighP95Latency
+          expr: >-
+            histogram_quantile(0.95,
+              sum by (le) (
+                rate(http_server_requests_seconds_bucket{namespace="bulletins", uri!~"/actuator.*"}[5m])
+              )
+            ) > 1
+          for: 5m
+          labels:
+            service: bulletins
+            severity: warning
+          annotations:
+            summary: Application p95 latency is above one second
+            description: HTTP p95 latency has stayed above one second for five minutes.
+
+    - name: bulletins.resources
+      rules:
+        - alert: BulletinsHighCpu
+          expr: >-
+            sum(rate(container_cpu_usage_seconds_total{namespace="bulletins", container="application"}[5m]))
+            /
+            clamp_min(sum(kube_pod_container_resource_limits{namespace="bulletins", container="application", resource="cpu", unit="core"}), 0.001)
+            > 0.8
+          for: 10m
+          labels:
+            service: bulletins
+            severity: warning
+          annotations:
+            summary: Application CPU usage is high
+            description: Bulletins has used more than 80% of its aggregate CPU limit for ten minutes.
+
+        - alert: BulletinsHighMemory
+          expr: >-
+            sum(container_memory_working_set_bytes{namespace="bulletins", container="application"})
+            /
+            clamp_min(sum(kube_pod_container_resource_limits{namespace="bulletins", container="application", resource="memory", unit="byte"}), 1)
+            > 0.85
+          for: 10m
+          labels:
+            service: bulletins
+            severity: warning
+          annotations:
+            summary: Application memory usage is high
+            description: Bulletins has used more than 85% of its aggregate memory limit for ten minutes.

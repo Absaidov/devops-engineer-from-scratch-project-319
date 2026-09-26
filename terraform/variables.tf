@@ -193,3 +193,25 @@ variable "deletion_protection" {
   type        = bool
   default     = false
 }
+
+variable "logging_retention_period" {
+  description = "Cloud Logging retention period for application pod logs."
+  type        = string
+  default     = "168h"
+
+  validation {
+    condition     = can(regex("^[1-9][0-9]*h$", var.logging_retention_period))
+    error_message = "logging_retention_period must be a positive duration in hours, for example 168h."
+  }
+}
+
+variable "prometheus_workspace_id" {
+  description = "Managed Service for Prometheus workspace ID. Create the workspace once in Yandex Monitoring before deploying the in-cluster collector."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.prometheus_workspace_id == "" || can(regex("^[a-z0-9]+$", var.prometheus_workspace_id))
+    error_message = "prometheus_workspace_id must be empty or contain a valid Yandex Cloud resource ID."
+  }
+}

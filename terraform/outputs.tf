@@ -109,3 +109,38 @@ output "lockbox_secret_version_id" {
   description = "Current application Lockbox secret version ID."
   value       = yandex_lockbox_secret_version.application.id
 }
+
+output "application_log_group_id" {
+  description = "Cloud Logging group ID for application pod logs."
+  value       = yandex_logging_group.application.id
+}
+
+output "application_log_group_name" {
+  description = "Cloud Logging group name for application pod logs."
+  value       = yandex_logging_group.application.name
+}
+
+output "kubernetes_monitoring_dashboard_id" {
+  description = "Yandex Monitoring dashboard ID for native Kubernetes metrics."
+  value       = yandex_monitoring_dashboard.kubernetes.id
+}
+
+output "monitoring_service_account_id" {
+  description = "Service account used to write metrics to Managed Prometheus."
+  value       = yandex_iam_service_account.monitoring.id
+}
+
+output "monitoring_api_key_id" {
+  description = "Managed Prometheus API key ID. Its secret value is stored only in Lockbox."
+  value       = yandex_iam_service_account_api_key.monitoring.id
+}
+
+output "observability_lockbox_secret_id" {
+  description = "Lockbox secret containing the Managed Prometheus API key."
+  value       = yandex_lockbox_secret.observability.id
+}
+
+output "prometheus_workspace_id" {
+  description = "Managed Service for Prometheus workspace used by the collector."
+  value       = var.prometheus_workspace_id
+}

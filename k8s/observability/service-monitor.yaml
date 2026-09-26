@@ -1,0 +1,24 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: bulletins
+  namespace: bulletins
+  labels:
+    release: prometheus
+    app.kubernetes.io/name: bulletins
+    app.kubernetes.io/component: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - bulletins
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bulletins
+      app.kubernetes.io/component: application
+  endpoints:
+    - port: management
+      path: /actuator/prometheus
+      scheme: http
+      interval: 30s
+      scrapeTimeout: 10s
+      honorLabels: false

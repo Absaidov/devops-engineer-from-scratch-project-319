@@ -14,6 +14,13 @@ environment  = "production"
 node_count                    = 2
 postgresql_resource_preset_id = "b1.medium"
 
+# Create a workspace once in Yandex Monitoring -> Prometheus and paste its ID.
+# Terraform currently has no Yandex provider resource for that workspace.
+prometheus_workspace_id = "monxxxxxxxxxxxxxxxxx"
+
+# Application logs are kept for seven days to limit the cost of a training stand.
+logging_retention_period = "168h"
+
 # Optional. When omitted, Terraform generates a globally unique bucket name.
 # app_bucket_name = "project-319-bulletins-unique-name"
 

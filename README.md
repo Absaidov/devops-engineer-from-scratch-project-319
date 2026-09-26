@@ -10,7 +10,10 @@
 - Managed Service for Kubernetes с двумя worker-узлами;
 - Managed Service for PostgreSQL без публичного IP;
 - приватный Object Storage bucket и сервисный аккаунт приложения;
-- Lockbox-секрет с параметрами PostgreSQL и Object Storage.
+- Lockbox-секрет с параметрами PostgreSQL и Object Storage;
+- Cloud Logging group с семидневным хранением логов приложения;
+- Yandex Monitoring dashboard для системных метрик Kubernetes;
+- сервисный аккаунт и Lockbox-секрет для Managed Service for Prometheus.
 
 ```text
 Internet ── trusted /32 ──> Kubernetes API
@@ -30,10 +33,15 @@ Terraform-конфигурация находится в каталоге [`terr
 - Terraform `>= 1.6.3`;
 - Yandex Cloud CLI (`yc`);
 - `kubectl` для проверки кластера;
+- Helm `>= 3.8.0` для установки Prometheus Operator;
 - активный платёжный аккаунт Yandex Cloud;
 - права администратора каталога на время учебного развёртывания, поскольку Terraform создаёт сервисные аккаунты и назначает им роли.
 
-Инфраструктура платная: отдельно тарифицируются master Kubernetes, worker, PostgreSQL, диски, Object Storage и исходящий трафик. После проверки удалите ненужные ресурсы командой `make terraform-destroy`.
+Инфраструктура платная: отдельно тарифицируются master Kubernetes, worker,
+PostgreSQL, диски, Object Storage, Managed Prometheus, Cloud Logging и исходящий
+трафик. После проверки удалите ненужные ресурсы командой
+`make terraform-destroy`, а созданные вручную workspace и notification channel
+— через консоль Yandex Monitoring.
 
 ## 1. Настройка Yandex Cloud CLI
 
@@ -108,7 +116,16 @@ cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 
 - `cloud_id` — результат `yc config get cloud-id`;
 - `folder_id` — результат `yc config get folder-id`;
-- `admin_cidrs` — ваш текущий публичный IPv4 с маской `/32`.
+- `admin_cidrs` — ваш текущий публичный IPv4 с маской `/32`;
+- `prometheus_workspace_id` — ID заранее созданного Managed Prometheus workspace.
+
+Workspace создайте до первого `terraform plan`: откройте **Yandex Monitoring
+→ Prometheus**, создайте workspace и скопируйте его автоматически выданный ID.
+Отдельное имя в текущем интерфейсе не задаётся. Не оставляйте пример
+`monxxxxxxxxxxxxxxxxx` из `terraform.tfvars.example`.
+
+`logging_retention_period` задаёт срок хранения логов и по умолчанию равен
+`168h` (семь дней).
 
 Публичный IP можно определить так:
 
@@ -198,6 +215,11 @@ PostgreSQL не имеет публичного IP и принимает TCP/643
 | `object_storage_access_key` | идентификатор ключа приложения |
 | `object_storage_secret_key` | секретный ключ, sensitive output |
 | `lockbox_secret_id` | ID секрета с DB/S3-параметрами |
+| `application_log_group_id`, `application_log_group_name` | группа логов приложения в Cloud Logging |
+| `kubernetes_monitoring_dashboard_id` | ID системного дашборда Yandex Monitoring |
+| `monitoring_service_account_id`, `monitoring_api_key_id` | учётная запись и ID ключа Managed Prometheus |
+| `observability_lockbox_secret_id` | Lockbox-секрет с ключом Managed Prometheus |
+| `prometheus_workspace_id` | ID workspace Managed Prometheus |
 
 Значения sensitive outputs скрываются в обычном `terraform output`, но остаются в Terraform state. Поэтому backend bucket закрыт, его ключи не хранятся в репозитории, а versioning защищает state от случайной перезаписи.
 
@@ -411,6 +433,180 @@ JDBC-соединение первичного учебного деплоя и�
 security group Kubernetes. Для перехода на `verify-full` необходимо отдельно
 смонтировать в pod корневой CA Yandex Cloud и указать `sslrootcert`.
 
+## Мониторинг и логирование в Yandex Cloud
+
+Наблюдаемость построена на управляемых сервисах. Системные метрики Managed
+Kubernetes автоматически доступны в Yandex Monitoring, а официальный
+Prometheus Operator отправляет Kubernetes- и Actuator-метрики приложения в
+Managed Service for Prometheus. DaemonSet Fluent Bit читает stdout/stderr
+контейнеров namespace `bulletins`, добавляет Kubernetes metadata и отправляет
+записи в отдельную Cloud Logging group.
+
+Публичные порты для мониторинга не открываются. Prometheus работает внутри
+кластера, Fluent Bit авторизуется через сервисный аккаунт worker-узлов, а ключ
+Managed Prometheus создаётся Terraform и сохраняется непосредственно в
+Lockbox `project-319-observability`.
+
+### Однократная подготовка Managed Prometheus
+
+Workspace пока нельзя создать ресурсом Yandex Terraform provider, поэтому его
+нужно подготовить вручную:
+
+1. Откройте **Yandex Monitoring → Prometheus**.
+2. Создайте workspace; Yandex Cloud автоматически выдаст ему идентификатор.
+3. Скопируйте этот ID и укажите в
+   `terraform/terraform.tfvars` как `prometheus_workspace_id`.
+
+После этого обязательно сформируйте новый план: применять старый
+`project-319.tfplan` нельзя.
+
+```bash
+export YC_TOKEN="$(yc iam create-token)"
+export AWS_ACCESS_KEY_ID="<ключ-backend>"
+export AWS_SECRET_ACCESS_KEY="<секрет-backend>"
+
+make terraform-plan
+make terraform-apply
+make terraform-output
+```
+
+Terraform создаёт Cloud Logging group, роли `logging.writer` и
+`monitoring.editor`, ключ Managed Prometheus в Lockbox и системный дашборд
+`project-319: Kubernetes`.
+
+У текущей версии Yandex Terraform provider возможна ситуация, когда dashboard
+фактически создаётся, но `terraform apply` завершается сообщением
+`expected operation metadata ... got ''`. В этом случае не создавайте dashboard
+повторно: найдите существующий `project-319-kubernetes` через data source
+`yandex_monitoring_dashboard` по полю `name`, возьмите показанный `id` и
+импортируйте его в state:
+
+```bash
+terraform -chdir=terraform import \
+  -var-file=terraform.tfvars \
+  yandex_monitoring_dashboard.kubernetes \
+  "<ID-существующего-dashboard>"
+make terraform-plan
+```
+
+После импорта план должен завершиться строкой `No changes`.
+
+### Установка агентов и проверка доставки
+
+Оставьте SSH-туннель к Kubernetes API работающим и экспортируйте подготовленный
+kubeconfig, как описано в разделе «Подключение kubectl». Затем выполните:
+
+```bash
+export KUBECONFIG=/tmp/project-319-kubeconfig
+export PROMETHEUS_WORKSPACE_ID="<ID-workspace>"
+
+make k8s-observability-deploy
+make k8s-observability-status
+make k8s-observability-check
+```
+
+`make k8s-observability-deploy` идемпотентно применяет Fluent Bit, официальный
+Yandex Cloud chart Prometheus Operator версии, закреплённой в `Makefile`,
+`ServiceMonitor` и `PrometheusRule`. Проверка подтверждает доступность
+`/actuator/prometheus`, наличие метрик в workspace и появление pod logs в Cloud
+Logging.
+
+Для генерации трафика и отдельных проверок используйте:
+
+```bash
+make k8s-public-check K8S_PUBLIC_CHECK_REQUESTS=50
+make k8s-observability-cloud-logs
+make k8s-observability-logs
+```
+
+Cloud Logging group называется `project-319-application-logs`, хранит записи
+семь дней и принимает только файлы контейнеров namespace `bulletins`. В
+консоли примените фильтр:
+
+```text
+resource_type = "bulletins"
+```
+
+Поля `resource_id` и `stream_name` содержат соответственно имя pod и
+контейнера. Это позволяет отдельно выбрать логи `application` и `migration`.
+
+### Обязательные метрики и PromQL
+
+| Сценарий | Метрика / запрос | Источник |
+|---|---|---|
+| CPU приложения | `container.cpu.limit_utilization` | Yandex Monitoring |
+| Память приложения | `container.memory.limit_utilization`, `container.memory.working_set_bytes` | Yandex Monitoring |
+| Рестарты контейнеров | `container.restart_count` | Yandex Monitoring |
+| Готовые pod | `sum(kube_pod_status_ready{namespace="bulletins",condition="true"})` | Managed Prometheus |
+| Доступность scrape | `max(up{namespace="bulletins",service="bulletins"})` | Managed Prometheus |
+| HTTP RPS и 5xx | `http_server_requests_seconds_count` с label `status` | Spring Actuator |
+| HTTP p95 latency | `histogram_quantile()` по `http_server_requests_seconds_bucket` | Spring Actuator |
+| Рестарты за период | `increase(kube_pod_container_status_restarts_total{namespace="bulletins"}[10m])` | Managed Prometheus |
+
+Terraform создаёт системный dashboard `project-319: Kubernetes`. Точные
+PromQL-запросы восьми панелей приложения сохранены в
+[`monitoring/dashboards/application-overview.json`](monitoring/dashboards/application-overview.json).
+Чтобы собрать dashboard `project-319: Application overview`, откройте **Yandex
+Monitoring → Метрики**, выберите источник данных **Prometheus** и нужный
+workspace. Для каждого объекта `panels` из JSON выполните значение `query`,
+нажмите **Добавить на дашборд** и используйте значение `title` как имя панели.
+При добавлении первой панели создайте dashboard `project-319: Application
+overview`, а остальные добавляйте в него. Панели покрывают Ready pod,
+доступность, CPU/RAM, RPS, 5xx, latency p95 и рестарты. Этот application
+dashboard вместе с notification channel является ручным ресурсом; полный набор
+запросов в репозитории позволяет воспроизвести его без подбора PromQL вручную.
+
+### Алерты и тестовое уведомление
+
+[`k8s/observability/prometheus-rules.yaml`](k8s/observability/prometheus-rules.yaml)
+содержит правила:
+
+| Alert | Условие | Задержка |
+|---|---|---:|
+| `BulletinsMetricsUnavailable` | нет метрик приложения | 3 мин |
+| `BulletinsReplicasUnavailable` | доступно меньше ожидаемого числа реплик | 5 мин |
+| `BulletinsContainerRestarted` | контейнер перезапустился | без задержки |
+| `BulletinsHigh5xxRate` | доля 5xx выше 5% | 5 мин |
+| `BulletinsHighP95Latency` | p95 выше 1 секунды | 5 мин |
+| `BulletinsHighCpu` | CPU выше 80% лимита | 10 мин |
+| `BulletinsHighMemory` | RAM выше 85% лимита | 10 мин |
+
+Для доставки уведомлений один раз создайте канал в **Yandex Monitoring →
+Notification channels**, например email-канал `project-319-email`. Затем
+загрузите конфигурацию Alertmanager из репозитория:
+
+```bash
+export YC_TOKEN="$(yc iam create-token)"
+make k8s-observability-alertmanager \
+  MONITORING_NOTIFICATION_CHANNEL=project-319-email
+```
+
+Шаблон находится в
+[`monitoring/alertmanager.yml.tpl`](monitoring/alertmanager.yml.tpl); в Git нет
+адреса почты или токенов. Все семь рабочих правил маршрутизируются в указанный
+канал, а `severity`/`service` labels сохраняются для группировки и фильтрации.
+
+Безопасная проверка не ломает приложение: временное правило `vector(1)` после
+минуты ожидания переходит в `FIRING`. На синхронизацию и вычисление правила
+заложите 3–5 минут.
+
+```bash
+make k8s-observability-alert-test
+# Проверить Prometheus workspace → Alerts и получение уведомления.
+make k8s-observability-alert-test-reset
+```
+
+Reset обязателен, иначе тестовое уведомление будет повторяться. Результат
+проверки управляемой наблюдаемости зафиксирован в репозитории:
+
+- [системные метрики Kubernetes](assets/yandex-monitoring-kubernetes.png);
+- [метрики приложения](assets/yandex-monitoring-application.png);
+- [JSON-логи приложения в Cloud Logging](assets/yandex-cloud-logging.png);
+- [тестовый алерт в состоянии FIRING](assets/yandex-monitoring-alert.png).
+
+Описание набора изображений также находится в
+[`assets/README.md`](assets/README.md).
+
 ## Удаление инфраструктуры
 
 Перед удалением очистите application bucket, если в нём появились объекты: `force_destroy` намеренно выключен.
@@ -421,6 +617,9 @@ make terraform-destroy
 ```
 
 State bucket и сервисный аккаунт backend не входят в основной state и удаляются отдельно только после завершения проекта.
+Созданные вручную Managed Prometheus workspace, notification channel и
+dashboard `project-319: Application overview` также не входят в Terraform
+state; после финальной проверки удалите их отдельно в Yandex Monitoring.
 
 ## Структура Terraform
 
@@ -433,6 +632,7 @@ terraform/
 ├── lockbox.tf
 ├── main.tf
 ├── network.tf
+├── observability.tf
 ├── outputs.tf
 ├── providers.tf
 ├── storage.tf

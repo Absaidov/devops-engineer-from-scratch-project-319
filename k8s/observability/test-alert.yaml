@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bulletins-manual-test
+  namespace: bulletins
+  labels:
+    release: prometheus
+    app.kubernetes.io/name: bulletins
+    app.kubernetes.io/component: alerting
+spec:
+  groups:
+    - name: bulletins.manual-test
+      rules:
+        - alert: BulletinsManualNotificationTest
+          expr: vector(1)
+          for: 1m
+          labels:
+            service: bulletins
+            severity: warning
+          annotations:
+            summary: Manual observability notification test
+            description: This temporary rule verifies the Yandex Managed Prometheus notification channel.
