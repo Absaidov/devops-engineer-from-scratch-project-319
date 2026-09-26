@@ -1,0 +1,174 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bulletin-board.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bulletin-board.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  minReadySeconds: {{ .Values.minReadySeconds }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds }}
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- with .Values.strategy.rollingUpdate }}
+    rollingUpdate:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "bulletin-board.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bulletin-board.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.migration.enabled }}
+        checksum/migrations: {{ include (print $.Template.BasePath "/migration-configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.secret.revision }}
+        project-319.hexlet.io/secret-revision: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.rolloutNonce }}
+        project-319.hexlet.io/rollout-nonce: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if .Values.placement.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "bulletin-board.selectorLabels" . | nindent 18 }}
+              matchLabelKeys:
+                - pod-template-hash
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
+      {{- if .Values.placement.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.placement.topologySpread.maxSkew }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ .Values.placement.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "bulletin-board.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.migration.enabled }}
+      initContainers:
+        - name: migration
+          image: "{{ .Values.migration.image.repository }}:{{ .Values.migration.image.tag }}"
+          imagePullPolicy: {{ .Values.migration.image.pullPolicy }}
+          args:
+            - migrate
+          env:
+            - name: FLYWAY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "bulletin-board.secretName" . }}
+                  key: SPRING_DATASOURCE_URL
+            - name: FLYWAY_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "bulletin-board.secretName" . }}
+                  key: SPRING_DATASOURCE_USERNAME
+            - name: FLYWAY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "bulletin-board.secretName" . }}
+                  key: SPRING_DATASOURCE_PASSWORD
+          volumeMounts:
+            - name: migrations
+              mountPath: /flyway/sql
+              readOnly: true
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      {{- end }}
+      containers:
+        - name: application
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "bulletin-board.configMapName" . }}
+            - secretRef:
+                name: {{ include "bulletin-board.secretName" . }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: management
+              containerPort: 9090
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: management
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: management
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: management
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep {{ .Values.preStopSleepSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      {{- if .Values.migration.enabled }}
+      volumes:
+        - name: migrations
+          configMap:
+            name: {{ include "bulletin-board.migrationsConfigMapName" . }}
+      {{- end }}
+

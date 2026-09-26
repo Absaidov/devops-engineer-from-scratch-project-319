@@ -1,0 +1,30 @@
+replicaCount: 1
+
+config:
+  SPRING_PROFILES_ACTIVE: dev
+  LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: DEBUG
+  LOGGING_LEVEL_IO_HEXLET_PROJECT_DEVOPS_DEPLOY: DEBUG
+
+publicService:
+  enabled: false
+
+ingress:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: false
+
+placement:
+  podAntiAffinity:
+    enabled: false
+  topologySpread:
+    enabled: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+

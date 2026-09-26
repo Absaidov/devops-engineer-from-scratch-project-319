@@ -1,0 +1,134 @@
+nameOverride: bulletins
+fullnameOverride: bulletins
+
+replicaCount: 2
+revisionHistoryLimit: 3
+minReadySeconds: 10
+progressDeadlineSeconds: 300
+
+image:
+  repository: cr.yandex/crphrkv4imihhuukiv7q/project-devops-deploy
+  tag: a100ed36995989034cee26c2cfd9e1558201bdaa
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+podAnnotations: {}
+podLabels: {}
+rolloutNonce: ""
+
+config:
+  SPRING_PROFILES_ACTIVE: prod
+  SERVER_PORT: "8080"
+  MANAGEMENT_SERVER_PORT: "9090"
+  MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,prometheus
+  MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+  MANAGEMENT_METRICS_DISTRIBUTION_PERCENTILESHISTOGRAM_HTTP_SERVER_REQUESTS: "true"
+  MANAGEMENT_METRICS_TAGS_APPLICATION: bulletins
+  SPRING_JPA_HIBERNATE_DDL_AUTO: validate
+  SPRING_OUTPUT_ANSI_ENABLED: "never"
+  LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: INFO
+  LOGGING_LEVEL_IO_HEXLET_PROJECT_DEVOPS_DEPLOY: INFO
+  STORAGE_S3_ENDPOINT: https://storage.yandexcloud.net
+  STORAGE_S3_REGION: ru-central1
+  JAVA_OPTS: >-
+    -XX:MaxRAMPercentage=70.0
+    -XX:+ExitOnOutOfMemoryError
+
+secret:
+  # Production uses the Secret synchronized from Lockbox by `make k8s-secret`.
+  existingSecret: bulletins-secrets
+  create: false
+  revision: ""
+  stringData: {}
+
+migration:
+  enabled: true
+  image:
+    repository: flyway/flyway
+    tag: 13.4.0-alpine
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+service:
+  type: ClusterIP
+  httpPort: 80
+  managementPort: 9090
+
+publicService:
+  enabled: true
+  type: LoadBalancer
+  port: 80
+  nodePort: 30080
+  externalTrafficPolicy: Cluster
+  annotations:
+    yandex.cloud/load-balancer-healthcheck-healthy-threshold: "2"
+    yandex.cloud/load-balancer-healthcheck-interval: 2s
+    yandex.cloud/load-balancer-healthcheck-timeout: 1s
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: bulletins.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+probes:
+  startup:
+    path: /actuator/health/liveness
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 30
+  readiness:
+    path: /actuator/health/readiness
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    path: /actuator/health/liveness
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+terminationGracePeriodSeconds: 30
+preStopSleepSeconds: 5
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: null
+
+placement:
+  podAntiAffinity:
+    enabled: true
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: DoNotSchedule
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

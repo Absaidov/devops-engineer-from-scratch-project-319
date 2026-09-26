@@ -243,6 +243,12 @@ Worker не получает публичный IP. Object Storage закрыт 
 
 ```text
 k8s/
+├── bulletin-board/              # основной Helm-чарт приложения
+│   ├── Chart.yaml
+│   ├── values.yaml
+│   ├── values-dev.yaml
+│   ├── values-prod.yaml
+│   └── templates/
 ├── namespace.yaml
 ├── configmap.yaml
 ├── secret.example.yaml
@@ -251,6 +257,7 @@ k8s/
 ├── service.yaml
 ├── load-balancer.yaml
 ├── pod-disruption-budget.yaml
+├── helm-adopt.sh
 ├── sync-secret.sh
 ├── public-check.sh
 └── rolling-update-check.sh
@@ -335,12 +342,14 @@ make k8s-check
 make k8s-public-check
 ```
 
-`make k8s-deploy` создаёт namespace `bulletins`, синхронизирует Secret,
-применяет ConfigMap, миграцию, внутренний и публичный Service, PDB и Deployment,
-а затем ждёт успешный rollout. `make k8s-check` временно открывает локальные
-порты и проверяет REST API и readiness endpoint. Создание внешнего адреса
-балансировщика занимает несколько минут; `make k8s-public-check` дожидается
-адреса и выполняет серию запросов к публичному REST endpoint.
+`make k8s-deploy` является совместимым алиасом `make helm-deploy`: он создаёт
+namespace `bulletins`, синхронизирует Secret из Lockbox, разворачивает Helm
+release и ждёт успешный rollout. Отдельные YAML-манифесты сохранены как
+результат предыдущего этапа и эталон структуры, но рабочим процессом поставки
+управляет чарт `k8s/bulletin-board`. `make k8s-check` временно открывает
+локальные порты и проверяет REST API и readiness endpoint. Создание внешнего
+адреса балансировщика занимает несколько минут; `make k8s-public-check`
+дожидается адреса и выполняет серию запросов к публичному REST endpoint.
 
 Чтобы проверить приложение вручную, оставьте следующую команду работающей:
 
@@ -432,6 +441,101 @@ JDBC-соединение первичного учебного деплоя и�
 `sslmode=require`. PostgreSQL закрыт от публичной сети и доступен только из
 security group Kubernetes. Для перехода на `verify-full` необходимо отдельно
 смонтировать в pod корневой CA Yandex Cloud и указать `sslrootcert`.
+
+## Helm-чарт и релизы приложения
+
+Рабочий чарт расположен в
+[`k8s/bulletin-board`](k8s/bulletin-board/). Он параметризует Deployment,
+ConfigMap приложения и миграций, внешний Secret, внутренний и публичный
+Service, PodDisruptionBudget и Ingress. Все шаблоны используют
+`.Release.Namespace`; удаление release не удаляет namespace, Lockbox Secret или
+компоненты мониторинга.
+
+В текущей архитектуре ingress-controller и External Secrets не используются:
+публичный трафик уже принимает Yandex Network Load Balancer, а credentials
+синхронизируются из Lockbox без сохранения в Helm values. Поэтому отдельные
+chart repositories для рабочего production-развёртывания не нужны. Ingress
+шаблонизирован и выключен по умолчанию; перед его включением установите
+поддерживаемый controller и укажите `ingress.className`.
+
+### Проверка и выбор окружения
+
+```bash
+helm version
+make helm-setup
+make helm-check
+make helm-template HELM_ENV=dev
+make helm-template HELM_ENV=prod
+```
+
+Значения объединяются в порядке `values.yaml` → `values-<environment>.yaml` →
+CLI overrides. `values-dev.yaml` использует одну реплику без публичного
+LoadBalancer/PDB, а `values-prod.yaml` сохраняет две реплики, PDB и внешний
+доступ. Для дополнительных несекретных параметров создайте отдельный
+values-файл вне Git или на основе production-файла:
+
+```bash
+cp k8s/bulletin-board/values-prod.yaml /tmp/project-319-values.yaml
+# Отредактировать /tmp/project-319-values.yaml.
+make helm-template HELM_VALUES_FILE=/tmp/project-319-values.yaml
+make helm-deploy HELM_VALUES_FILE=/tmp/project-319-values.yaml
+```
+
+Реальные DB/S3 значения нельзя помещать в values или передавать через `--set`:
+Helm сохраняет параметры release в Kubernetes. Production использует
+`secret.create=false` и существующий `bulletins-secrets`; `make helm-deploy`
+передаёт в чарт только имя и `resourceVersion` секрета.
+
+### Первый deploy, обновление и откат
+
+Первый deploy безопасно принимает существующие ресурсы предыдущего этапа под
+управление Helm. `k8s/helm-adopt.sh` добавляет ownership metadata только
+Deployment, Service, ConfigMap и PDB; внешний Secret и namespace скрипт
+миграции намеренно не принимает под управление release. Публичный Service
+обновляется на месте, поэтому созданный Yandex Load Balancer сохраняется.
+
+```bash
+make helm-deploy HELM_ENV=prod
+make helm-status
+make k8s-check
+make k8s-public-check
+```
+
+Новая версия выкатывается по immutable Git SHA через тот же release:
+
+```bash
+make helm-deploy \
+  HELM_ENV=prod \
+  K8S_IMAGE_TAG=<40-символьный-Git-SHA>
+```
+
+Helm хранит историю revisions. Сначала выберите успешную версию, затем
+выполните rollback:
+
+```bash
+make helm-history
+make helm-rollback HELM_REVISION=<revision>
+make helm-status
+make k8s-check
+```
+
+Rollback возвращает Kubernetes-манифесты и образ, но не откатывает уже
+выполненные Flyway-миграции или внешний Lockbox Secret. Миграции должны быть
+append-only и обратно совместимыми.
+
+Отдельный workflow
+[`helm-check.yml`](.github/workflows/helm-check.yml) без credentials запускает
+`helm lint --strict` и рендер обоих окружений. Автоматический production deploy
+на GitHub-hosted runner намеренно не включён: API кластера разрешён только из
+`admin_cidrs`. Опциональный CD следует запускать с protected environment и
+self-hosted runner в доверенной сети; статические kubeconfig/YC credentials в
+репозиторий добавлять нельзя.
+
+Подробнее о значениях и ограничениях — в
+[`k8s/bulletin-board/README.md`](k8s/bulletin-board/README.md). Команды
+`upgrade --install`, multiple values и rollback соответствуют
+[официальной документации Helm](https://helm.sh/docs/helm/helm_upgrade/) и
+[рекомендациям по структуре chart](https://helm.sh/docs/chart_best_practices/).
 
 ## Мониторинг и логирование в Yandex Cloud
 

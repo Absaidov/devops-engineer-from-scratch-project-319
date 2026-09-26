@@ -1,0 +1,27 @@
+{{- if .Values.publicService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bulletin-board.fullname" . }}-public
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bulletin-board.labels" . | nindent 4 }}
+  {{- with .Values.publicService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.publicService.type }}
+  externalTrafficPolicy: {{ .Values.publicService.externalTrafficPolicy }}
+  selector:
+    {{- include "bulletin-board.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.publicService.port }}
+      targetPort: http
+      {{- with .Values.publicService.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
+      protocol: TCP
+{{- end }}
+

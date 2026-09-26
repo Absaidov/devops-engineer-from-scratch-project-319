@@ -1,0 +1,17 @@
+The {{ include "bulletin-board.fullname" . }} release is deployed in namespace {{ .Release.Namespace }}.
+
+Check the rollout:
+  kubectl --namespace {{ .Release.Namespace }} rollout status deployment/{{ include "bulletin-board.fullname" . }}
+
+Open a local connection:
+  kubectl --namespace {{ .Release.Namespace }} port-forward service/{{ include "bulletin-board.fullname" . }} 8080:{{ .Values.service.httpPort }}
+  curl --fail http://127.0.0.1:8080/api/bulletins
+
+{{- if .Values.publicService.enabled }}
+The public LoadBalancer address may take several minutes to appear:
+  kubectl --namespace {{ .Release.Namespace }} get service/{{ include "bulletin-board.fullname" . }}-public
+{{- end }}
+{{- if .Values.ingress.enabled }}
+Ingress is enabled. Confirm that an Ingress controller handles class {{ .Values.ingress.className | default "<default>" }}.
+{{- end }}
+

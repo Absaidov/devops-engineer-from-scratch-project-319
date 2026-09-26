@@ -43,6 +43,7 @@ K8S_NAMESPACE ?= bulletins
 K8S_DEPLOYMENT ?= bulletins
 K8S_SERVICE ?= bulletins
 K8S_PUBLIC_SERVICE ?= bulletins-public
+K8S_SECRET_NAME ?= bulletins-secrets
 K8S_IMAGE_REPOSITORY ?= cr.yandex/crphrkv4imihhuukiv7q/project-devops-deploy
 K8S_IMAGE_TAG ?= a100ed36995989034cee26c2cfd9e1558201bdaa
 K8S_IMAGE ?= $(K8S_IMAGE_REPOSITORY):$(K8S_IMAGE_TAG)
@@ -51,6 +52,14 @@ K8S_PUBLIC_CHECK_REQUESTS ?= 20
 K8S_DISTRIBUTION_REQUESTS ?= 60
 K8S_ROLLOUT_TIMEOUT ?= 300s
 HELM ?= helm
+HELM_RELEASE ?= bulletins
+HELM_CHART_DIR ?= $(K8S_DIR)/bulletin-board
+HELM_ENV ?= prod
+HELM_VALUES_FILE ?= $(HELM_CHART_DIR)/values-$(HELM_ENV).yaml
+HELM_TIMEOUT ?= 10m
+HELM_HISTORY_MAX ?= 10
+HELM_REVISION ?=
+HELM_ADOPT_SCRIPT ?= $(K8S_DIR)/helm-adopt.sh
 K8S_OBSERVABILITY_DIR ?= $(K8S_DIR)/observability
 PROMETHEUS_NAMESPACE ?= prometheus-operator-space
 PROMETHEUS_CHART_VERSION ?= 88.5.2-1
@@ -77,7 +86,9 @@ export ANSIBLE_HOME := $(abspath .ansible)
 	k8s-observability-check k8s-observability-logs \
 	k8s-observability-cloud-logs k8s-observability-alertmanager \
 	k8s-observability-alert-test \
-	k8s-observability-alert-test-reset
+	k8s-observability-alert-test-reset \
+	helm-setup helm-check helm-lint helm-template helm-adopt helm-deploy \
+	helm-status helm-history helm-rollback
 
 install:
 	$(PYTHON) -m venv $(VENV_DIR)
@@ -224,35 +235,77 @@ terraform-destroy:
 k8s-secret:
 	$(KUBECTL) apply --filename $(K8S_DIR)/namespace.yaml
 	KUBECTL="$(KUBECTL)" K8S_NAMESPACE="$(K8S_NAMESPACE)" \
+		K8S_SECRET_NAME="$(K8S_SECRET_NAME)" \
 		$(K8S_DIR)/sync-secret.sh
 
-k8s-deploy: k8s-secret
-	$(KUBECTL) apply --filename $(K8S_DIR)/configmap.yaml
-	$(KUBECTL) apply --filename $(K8S_DIR)/migration-configmap.yaml
-	$(KUBECTL) apply --filename $(K8S_DIR)/service.yaml
-	$(KUBECTL) apply --filename $(K8S_DIR)/load-balancer.yaml
-	$(KUBECTL) apply --filename $(K8S_DIR)/pod-disruption-budget.yaml
+helm-setup:
+	@command -v $(HELM) >/dev/null 2>&1 || { echo "Install Helm from https://helm.sh/docs/intro/install/"; exit 1; }
+	$(HELM) version
+	@echo "No additional chart repository is required by bulletin-board; production uses Service LoadBalancer and Lockbox sync."
+
+helm-lint:
+	@test -f "$(HELM_CHART_DIR)/values.yaml" || { echo "Missing Helm chart: $(HELM_CHART_DIR)"; exit 1; }
+	$(HELM) lint --strict $(HELM_CHART_DIR)
+	$(HELM) lint --strict $(HELM_CHART_DIR) --values $(HELM_CHART_DIR)/values-dev.yaml
+	$(HELM) lint --strict $(HELM_CHART_DIR) --values $(HELM_CHART_DIR)/values-prod.yaml
+
+helm-check: helm-lint
+	$(HELM) template $(HELM_RELEASE) $(HELM_CHART_DIR) \
+		--namespace $(K8S_NAMESPACE) \
+		--values $(HELM_CHART_DIR)/values-dev.yaml >/dev/null
+	$(HELM) template $(HELM_RELEASE) $(HELM_CHART_DIR) \
+		--namespace $(K8S_NAMESPACE) \
+		--values $(HELM_CHART_DIR)/values-prod.yaml >/dev/null
+
+helm-template: helm-lint
+	@test -f "$(HELM_VALUES_FILE)" || { echo "Missing values file: $(HELM_VALUES_FILE)"; exit 1; }
+	$(HELM) template $(HELM_RELEASE) $(HELM_CHART_DIR) \
+		--namespace $(K8S_NAMESPACE) \
+		--values $(HELM_VALUES_FILE) \
+		--set-string image.repository="$(K8S_IMAGE_REPOSITORY)" \
+		--set-string image.tag="$(K8S_IMAGE_TAG)"
+
+helm-adopt: k8s-secret
+	KUBECTL="$(KUBECTL)" K8S_NAMESPACE="$(K8S_NAMESPACE)" \
+		HELM_RELEASE="$(HELM_RELEASE)" bash $(HELM_ADOPT_SCRIPT)
+
+helm-deploy: helm-check helm-adopt
+	@test -f "$(HELM_VALUES_FILE)" || { echo "Missing values file: $(HELM_VALUES_FILE)"; exit 1; }
 	@set -eu; \
-		rendered_file="$$(mktemp "$${TMPDIR:-/tmp}/project-319-deployment.XXXXXX")"; \
-		trap 'rm -f "$$rendered_file"' EXIT INT TERM; \
-		$(KUBECTL) set image --filename $(K8S_DIR)/deployment.yaml \
-			application="$(K8S_IMAGE)" --local --output yaml >"$$rendered_file"; \
-		if [ ! -s "$$rendered_file" ]; then \
-			cp $(K8S_DIR)/deployment.yaml "$$rendered_file"; \
-		fi; \
-		$(KUBECTL) apply --filename "$$rendered_file"
-	@set -eu; \
-		config_revision="$$( \
+		secret_revision="$$( \
 			$(KUBECTL) --namespace $(K8S_NAMESPACE) get \
-				configmap/bulletins-config \
-				configmap/bulletins-migrations \
-				secret/bulletins-secrets \
-				--output jsonpath='{range .items[*]}{.metadata.uid}:{.metadata.resourceVersion};{end}' \
+				secret/$(K8S_SECRET_NAME) --output jsonpath='{.metadata.resourceVersion}' \
 		)"; \
-		$(KUBECTL) --namespace $(K8S_NAMESPACE) patch \
-			deployment/$(K8S_DEPLOYMENT) --type merge \
-			--patch "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"project-319.hexlet.io/config-revision\":\"$$config_revision\"}}}}}" \
-			--output name
+		$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
+			--namespace $(K8S_NAMESPACE) \
+			--create-namespace \
+			--values $(HELM_VALUES_FILE) \
+			--set-string image.repository="$(K8S_IMAGE_REPOSITORY)" \
+			--set-string image.tag="$(K8S_IMAGE_TAG)" \
+			--set-string secret.existingSecret="$(K8S_SECRET_NAME)" \
+			--set-string secret.revision="$$secret_revision" \
+			--wait \
+			--timeout $(HELM_TIMEOUT) \
+			--history-max $(HELM_HISTORY_MAX)
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) rollout status \
+		deployment/$(K8S_DEPLOYMENT) --timeout=$(K8S_ROLLOUT_TIMEOUT)
+
+k8s-deploy: helm-deploy
+
+helm-status:
+	$(HELM) status $(HELM_RELEASE) --namespace $(K8S_NAMESPACE)
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) get deployment,pods,service,poddisruptionbudget --output wide
+
+helm-history:
+	$(HELM) history $(HELM_RELEASE) --namespace $(K8S_NAMESPACE)
+
+helm-rollback:
+	@test -n "$(HELM_REVISION)" || { echo "Usage: make helm-rollback HELM_REVISION=<revision>"; exit 1; }
+	$(HELM) rollback $(HELM_RELEASE) $(HELM_REVISION) \
+		--namespace $(K8S_NAMESPACE) \
+		--wait \
+		--cleanup-on-fail \
+		--timeout $(HELM_TIMEOUT)
 	$(KUBECTL) --namespace $(K8S_NAMESPACE) rollout status \
 		deployment/$(K8S_DEPLOYMENT) --timeout=$(K8S_ROLLOUT_TIMEOUT)
 

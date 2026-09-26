@@ -1,0 +1,23 @@
+replicaCount: 2
+
+config:
+  SPRING_PROFILES_ACTIVE: prod
+  LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: INFO
+  LOGGING_LEVEL_IO_HEXLET_PROJECT_DEVOPS_DEPLOY: INFO
+
+publicService:
+  enabled: true
+
+ingress:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+placement:
+  podAntiAffinity:
+    enabled: true
+  topologySpread:
+    enabled: true
+

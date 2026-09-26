@@ -1,0 +1,38 @@
+name: Helm chart check
+
+on:
+  pull_request:
+    paths:
+      - k8s/bulletin-board/**
+      - Makefile
+      - .github/workflows/helm-check.yml
+  push:
+    branches:
+      - main
+    paths:
+      - k8s/bulletin-board/**
+      - Makefile
+      - .github/workflows/helm-check.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v4.3.0
+
+      - name: Lint and render every environment
+        run: make helm-check
+

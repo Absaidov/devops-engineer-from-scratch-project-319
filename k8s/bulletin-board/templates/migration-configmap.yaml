@@ -1,0 +1,16 @@
+{{- if .Values.migration.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "bulletin-board.migrationsConfigMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: {{ include "bulletin-board.chart" . }}
+    app.kubernetes.io/name: {{ include "bulletin-board.fullname" . }}
+    app.kubernetes.io/component: migration
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  {{- (.Files.Glob "migrations/*.sql").AsConfig | nindent 2 }}
+{{- end }}
