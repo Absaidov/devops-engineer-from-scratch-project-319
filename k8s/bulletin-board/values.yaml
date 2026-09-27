@@ -35,11 +35,23 @@ config:
     -XX:+ExitOnOutOfMemoryError
 
 secret:
-  # Production uses the Secret synchronized from Lockbox by `make k8s-secret`.
+  # Production uses the Secret continuously synchronized from Lockbox by ESO.
   existingSecret: bulletins-secrets
   create: false
-  revision: ""
+  autoReload: true
   stringData: {}
+
+externalSecret:
+  enabled: false
+  refreshPolicy: Periodic
+  refreshInterval: 30s
+  remoteSecretId: ""
+  secretStoreRef:
+    name: project-319-lockbox
+    kind: ClusterSecretStore
+  target:
+    creationPolicy: Orphan
+    deletionPolicy: Retain
 
 migration:
   enabled: true

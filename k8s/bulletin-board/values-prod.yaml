@@ -1,5 +1,8 @@
 replicaCount: 2
 
+externalSecret:
+  enabled: true
+
 config:
   SPRING_PROFILES_ACTIVE: prod
   LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_WEB: INFO
@@ -20,4 +23,3 @@ placement:
     enabled: true
   topologySpread:
     enabled: true
-

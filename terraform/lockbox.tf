@@ -10,6 +10,10 @@ resource "yandex_lockbox_secret_version" "application" {
   secret_id   = yandex_lockbox_secret.application.id
   description = "Application infrastructure credentials managed by Terraform"
 
+  lifecycle {
+    create_before_destroy = true
+  }
+
   entries {
     key        = "DB_HOST"
     text_value = local.database_host
@@ -59,10 +63,15 @@ resource "yandex_lockbox_secret_version" "application" {
     key        = "S3_SECRET_KEY"
     text_value = yandex_iam_service_account_static_access_key.application.secret_key
   }
+
+  entries {
+    key        = "ROTATION_MARKER"
+    text_value = "initial-v1"
+  }
 }
 
-resource "yandex_lockbox_secret_iam_member" "kubernetes_nodes" {
+resource "yandex_lockbox_secret_iam_member" "external_secrets" {
   secret_id = yandex_lockbox_secret.application.id
   role      = "lockbox.payloadViewer"
-  member    = "serviceAccount:${yandex_iam_service_account.kubernetes_nodes.id}"
+  member    = "serviceAccount:${yandex_iam_service_account.external_secrets.id}"
 }

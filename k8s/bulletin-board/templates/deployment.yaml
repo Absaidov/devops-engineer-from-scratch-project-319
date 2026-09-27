@@ -5,6 +5,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "bulletin-board.labels" . | nindent 4 }}
+  {{- if .Values.secret.autoReload }}
+  annotations:
+    secret.reloader.stakater.com/reload: {{ include "bulletin-board.secretName" . | quote }}
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
@@ -31,9 +35,6 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- if .Values.migration.enabled }}
         checksum/migrations: {{ include (print $.Template.BasePath "/migration-configmap.yaml") . | sha256sum }}
-        {{- end }}
-        {{- with .Values.secret.revision }}
-        project-319.hexlet.io/secret-revision: {{ . | quote }}
         {{- end }}
         {{- with .Values.rolloutNonce }}
         project-319.hexlet.io/rollout-nonce: {{ . | quote }}
@@ -171,4 +172,3 @@ spec:
           configMap:
             name: {{ include "bulletin-board.migrationsConfigMapName" . }}
       {{- end }}
-

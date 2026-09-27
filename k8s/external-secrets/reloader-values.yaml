@@ -1,0 +1,8 @@
+reloader:
+  watchGlobally: false
+  namespaces:
+    - bulletins
+  reloadStrategy: annotations
+  autoReloadAll: false
+  reloadOnCreate: false
+  logLevel: info

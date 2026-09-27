@@ -16,6 +16,12 @@ resource "yandex_iam_service_account" "object_storage" {
   description = "Service account used by the application to access Object Storage"
 }
 
+resource "yandex_iam_service_account" "external_secrets" {
+  folder_id   = var.folder_id
+  name        = "${var.project_name}-external-secrets"
+  description = "Service account used by External Secrets Operator to read application secrets"
+}
+
 resource "yandex_resourcemanager_folder_iam_member" "kubernetes_cluster_agent" {
   folder_id = var.folder_id
   role      = "k8s.clusters.agent"

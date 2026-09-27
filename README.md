@@ -11,6 +11,7 @@
 - Managed Service for PostgreSQL без публичного IP;
 - приватный Object Storage bucket и сервисный аккаунт приложения;
 - Lockbox-секрет с параметрами PostgreSQL и Object Storage;
+- отдельный сервисный аккаунт External Secrets с доступом только к этому Lockbox-секрету;
 - Cloud Logging group с семидневным хранением логов приложения;
 - Yandex Monitoring dashboard для системных метрик Kubernetes;
 - сервисный аккаунт и Lockbox-секрет для Managed Service for Prometheus.
@@ -33,7 +34,7 @@ Terraform-конфигурация находится в каталоге [`terr
 - Terraform `>= 1.6.3`;
 - Yandex Cloud CLI (`yc`);
 - `kubectl` для проверки кластера;
-- Helm `>= 3.8.0` для установки Prometheus Operator;
+- Helm `>= 3.8.0` для установки Prometheus Operator и External Secrets Operator;
 - активный платёжный аккаунт Yandex Cloud;
 - права администратора каталога на время учебного развёртывания, поскольку Terraform создаёт сервисные аккаунты и назначает им роли.
 
@@ -190,10 +191,9 @@ yc managed-postgresql cluster get \
 yc storage bucket get \
   --name "$(terraform -chdir=terraform output -raw object_storage_bucket)"
 
-# Lockbox: получить метаданные и payload
+# Lockbox: получить только метаданные, не печатая payload в терминал
 export APP_SECRET_ID="$(terraform -chdir=terraform output -raw lockbox_secret_id)"
 yc lockbox secret get "$APP_SECRET_ID"
-yc lockbox payload get "$APP_SECRET_ID"
 ```
 
 PostgreSQL не имеет публичного IP и принимает TCP/6432 только от security group Kubernetes. Поэтому проверка реального SQL-подключения выполняется из pod после развёртывания приложения.
@@ -215,6 +215,7 @@ PostgreSQL не имеет публичного IP и принимает TCP/643
 | `object_storage_access_key` | идентификатор ключа приложения |
 | `object_storage_secret_key` | секретный ключ, sensitive output |
 | `lockbox_secret_id` | ID секрета с DB/S3-параметрами |
+| `external_secrets_service_account_id` | ID сервисного аккаунта External Secrets Operator |
 | `application_log_group_id`, `application_log_group_name` | группа логов приложения в Cloud Logging |
 | `kubernetes_monitoring_dashboard_id` | ID системного дашборда Yandex Monitoring |
 | `monitoring_service_account_id`, `monitoring_api_key_id` | учётная запись и ID ключа Managed Prometheus |
@@ -249,6 +250,12 @@ k8s/
 │   ├── values-dev.yaml
 │   ├── values-prod.yaml
 │   └── templates/
+├── external-secrets/
+│   ├── cluster-secret-store.yaml
+│   ├── external-secrets-values.yaml
+│   ├── reloader-values.yaml
+│   ├── install.sh
+│   └── rotation-check.sh
 ├── namespace.yaml
 ├── configmap.yaml
 ├── secret.example.yaml
@@ -258,7 +265,6 @@ k8s/
 ├── load-balancer.yaml
 ├── pod-disruption-budget.yaml
 ├── helm-adopt.sh
-├── sync-secret.sh
 ├── public-check.sh
 └── rolling-update-check.sh
 ```
@@ -326,12 +332,11 @@ kubectl get nodes
 Secret и не содержит рабочих значений. Base64 в Kubernetes не является
 шифрованием, поэтому настоящие DB/S3 credentials остаются в Lockbox.
 
-Команда `make k8s-secret` находит Lockbox `project-319-application` через YC
-CLI, перекладывает поля `DB_*`/`S3_*` в переменные приложения и применяет
-Secret напрямую через stdin. Секретный payload не записывается в репозиторий
-или локальный файл. При другом имени Lockbox задайте переменную
-`K8S_LOCKBOX_SECRET_NAME`; также можно передать его ID через
-`K8S_LOCKBOX_SECRET_ID`.
+External Secrets Operator каждые 30 секунд читает Lockbox
+`project-319-application`, формирует `bulletins-secrets` и преобразует поля
+`DB_*`/`S3_*` в переменные приложения. Helm получает только несекретный ID
+Lockbox; payload не попадает в values или Git. Команда `make k8s-secret`
+теперь лишь показывает состояние автоматической синхронизации.
 
 Для полного первичного деплоя выполните из корня репозитория:
 
@@ -343,8 +348,8 @@ make k8s-public-check
 ```
 
 `make k8s-deploy` является совместимым алиасом `make helm-deploy`: он создаёт
-namespace `bulletins`, синхронизирует Secret из Lockbox, разворачивает Helm
-release и ждёт успешный rollout. Отдельные YAML-манифесты сохранены как
+namespace `bulletins`, устанавливает ESO и Reloader, разворачивает Helm release,
+ждёт синхронизации Lockbox и успешного rollout. Отдельные YAML-манифесты сохранены как
 результат предыдущего этапа и эталон структуры, но рабочим процессом поставки
 управляет чарт `k8s/bulletin-board`. `make k8s-check` временно открывает
 локальные порты и проверяет REST API и readiness endpoint. Создание внешнего
@@ -446,17 +451,16 @@ security group Kubernetes. Для перехода на `verify-full` необх
 
 Рабочий чарт расположен в
 [`k8s/bulletin-board`](k8s/bulletin-board/). Он параметризует Deployment,
-ConfigMap приложения и миграций, внешний Secret, внутренний и публичный
+ConfigMap приложения и миграций, ExternalSecret, внутренний и публичный
 Service, PodDisruptionBudget и Ingress. Все шаблоны используют
 `.Release.Namespace`; удаление release не удаляет namespace, Lockbox Secret или
 компоненты мониторинга.
 
-В текущей архитектуре ingress-controller и External Secrets не используются:
-публичный трафик уже принимает Yandex Network Load Balancer, а credentials
-синхронизируются из Lockbox без сохранения в Helm values. Поэтому отдельные
-chart repositories для рабочего production-развёртывания не нужны. Ingress
-шаблонизирован и выключен по умолчанию; перед его включением установите
-поддерживаемый controller и укажите `ingress.className`.
+Публичный трафик принимает Yandex Network Load Balancer, поэтому Ingress
+выключен по умолчанию. External Secrets устанавливается из OCI-чарта Yandex
+Cloud Marketplace, а Reloader — из официального репозитория Stakater. Перед
+включением Ingress установите поддерживаемый controller и укажите
+`ingress.className`.
 
 ### Проверка и выбор окружения
 
@@ -483,8 +487,8 @@ make helm-deploy HELM_VALUES_FILE=/tmp/project-319-values.yaml
 
 Реальные DB/S3 значения нельзя помещать в values или передавать через `--set`:
 Helm сохраняет параметры release в Kubernetes. Production использует
-`secret.create=false` и существующий `bulletins-secrets`; `make helm-deploy`
-передаёт в чарт только имя и `resourceVersion` секрета.
+`secret.create=false` и автоматически поддерживаемый `bulletins-secrets`;
+`make helm-deploy` передаёт в чарт только имя Secret и ID Lockbox.
 
 ### Первый deploy, обновление и откат
 
@@ -536,6 +540,89 @@ self-hosted runner в доверенной сети; статические kube
 `upgrade --install`, multiple values и rollback соответствуют
 [официальной документации Helm](https://helm.sh/docs/helm/helm_upgrade/) и
 [рекомендациям по структуре chart](https://helm.sh/docs/chart_best_practices/).
+
+## Управление секретами через Yandex Lockbox
+
+Terraform создаёт `project-319-application`, сохраняет его ID в output
+`lockbox_secret_id` и выдаёт роль `lockbox.payloadViewer` только отдельному
+сервисному аккаунту `project-319-external-secrets`. Worker-аккаунт больше не
+может читать payload. Отдельный Lockbox `project-319-observability` хранит ключ
+Managed Prometheus.
+
+Официальный Yandex Marketplace chart External Secrets Operator закреплён на
+версии `2.5.0-2` и устанавливается в namespace
+`external-secrets-operator-space`. Авторизованный ключ создаётся только при
+первой установке во временном файле с правами `0600`, передаётся чарту через
+`--set-file`, хранится в Kubernetes Secret `sa-creds` и удаляется с локального
+диска. DB/S3 payload не записывается в репозиторий или Helm values. Сам
+bootstrap-ключ согласно устройству официального чарта хранится в `sa-creds` и
+Kubernetes Secret состояния Helm; доступ к ним ограничен RBAC кластера.
+`ClusterSecretStore project-319-lockbox` разрешён только
+namespace `bulletins`.
+
+Примените Terraform перед первой установкой, чтобы создать service account,
+роль и новую версию Lockbox с `ROTATION_MARKER`:
+
+```bash
+export YC_TOKEN="$(yc iam create-token)"
+make terraform-plan
+make terraform-apply
+```
+
+Затем установите контроллеры и приложение:
+
+```bash
+make external-secrets-install
+make helm-deploy HELM_ENV=prod
+make external-secrets-status
+make k8s-check
+make k8s-public-check
+```
+
+`ExternalSecret bulletins` работает с политикой `Periodic` и интервалом `30s`.
+Он создаёт или обновляет `bulletins-secrets`, не удаляя существующий Secret при
+удалении объекта (`creationPolicy: Orphan`, `deletionPolicy: Retain`).
+Deployment читает этот Secret через `envFrom`. Так как переменные окружения
+работающего контейнера не перечитываются автоматически, Deployment помечен
+аннотацией Reloader. При изменении Secret Reloader запускает RollingUpdate;
+две реплики, `maxUnavailable: 0`, readiness probes и PDB не допускают простоя.
+
+### Проверка автоматической ротации
+
+Безопасная стендовая проверка изменяет только служебный `ROTATION_MARKER`, а не
+пароль работающей PostgreSQL или S3-ключ. Скрипт создаёт новую версию Lockbox на
+основе текущей, ждёт обновления Kubernetes Secret и автоматической замены pod,
+одновременно выполняя HTTP-запросы:
+
+```bash
+make external-secrets-rotation-check
+```
+
+Значение маркера не печатается: сравниваются SHA-256 и `resourceVersion`.
+Успешная проверка подтверждает `ExternalSecret Ready`, новые pod, `2/2 Ready`
+и `failed=0, 5xx=0` во время ротации.
+
+Контрольный запуск на стенде 27 сентября 2026 года создал новую версию
+Lockbox, автоматически заменил обе реплики и выполнил 383 HTTP-запроса:
+`failed=0`, `5xx=0`.
+
+Реальные PostgreSQL/S3 credentials следует ротировать двухфазно: создать новые
+credentials, записать их в новую версию Lockbox, дождаться синхронизации и
+rolling rollout, проверить приложение и только затем отозвать старые. Простая
+замена одного `DB_PASSWORD` только в Lockbox нарушит соответствие паролю БД.
+
+Авторизованный ключ самого ESO можно безопасно заменить отдельно:
+
+```bash
+make external-secrets-auth-rotate
+```
+
+Скрипт устанавливает новый ключ, проверяет готовность `ClusterSecretStore` и
+только после этого отзывает предыдущий.
+
+Официальные материалы: [установка ESO с поддержкой Yandex Lockbox](https://yandex.cloud/ru/docs/managed-kubernetes/operations/applications/external-secrets-operator),
+[синхронизация Lockbox с Managed Kubernetes](https://yandex.cloud/ru/docs/managed-kubernetes/tutorials/kubernetes-lockbox-secrets),
+[управление версиями Lockbox](https://yandex.cloud/ru/docs/lockbox/operations/secret-version-manage).
 
 ## Мониторинг и логирование в Yandex Cloud
 

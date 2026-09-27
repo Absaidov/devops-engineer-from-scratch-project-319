@@ -110,6 +110,11 @@ output "lockbox_secret_version_id" {
   value       = yandex_lockbox_secret_version.application.id
 }
 
+output "external_secrets_service_account_id" {
+  description = "Service account used by External Secrets Operator to read the application Lockbox secret."
+  value       = yandex_iam_service_account.external_secrets.id
+}
+
 output "application_log_group_id" {
   description = "Cloud Logging group ID for application pod logs."
   value       = yandex_logging_group.application.id

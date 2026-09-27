@@ -60,6 +60,20 @@ HELM_TIMEOUT ?= 10m
 HELM_HISTORY_MAX ?= 10
 HELM_REVISION ?=
 HELM_ADOPT_SCRIPT ?= $(K8S_DIR)/helm-adopt.sh
+LOCKBOX_SECRET_ID ?=
+K8S_LOCKBOX_SECRET_NAME ?= project-319-application
+EXTERNAL_SECRETS_DIR ?= $(K8S_DIR)/external-secrets
+EXTERNAL_SECRETS_NAMESPACE ?= external-secrets-operator-space
+EXTERNAL_SECRETS_RELEASE ?= external-secrets
+EXTERNAL_SECRETS_CHART ?= oci://cr.yandex/yc-marketplace/yandex-cloud/external-secrets/charts/external-secrets
+EXTERNAL_SECRETS_CHART_VERSION ?= 2.5.0-2
+EXTERNAL_SECRETS_SERVICE_ACCOUNT_NAME ?= project-319-external-secrets
+EXTERNAL_SECRETS_STORE_NAME ?= project-319-lockbox
+EXTERNAL_SECRET_NAME ?= bulletins
+EXTERNAL_SECRETS_WAIT_TIMEOUT ?= 300s
+RELOADER_NAMESPACE ?= reloader
+RELOADER_RELEASE ?= reloader
+RELOADER_CHART_VERSION ?= 2.2.17
 K8S_OBSERVABILITY_DIR ?= $(K8S_DIR)/observability
 PROMETHEUS_NAMESPACE ?= prometheus-operator-space
 PROMETHEUS_CHART_VERSION ?= 88.5.2-1
@@ -88,7 +102,9 @@ export ANSIBLE_HOME := $(abspath .ansible)
 	k8s-observability-alert-test \
 	k8s-observability-alert-test-reset \
 	helm-setup helm-check helm-lint helm-template helm-adopt helm-deploy \
-	helm-status helm-history helm-rollback
+	helm-status helm-history helm-rollback \
+	external-secrets-install external-secrets-status \
+	external-secrets-auth-rotate external-secrets-rotation-check
 
 install:
 	$(PYTHON) -m venv $(VENV_DIR)
@@ -232,22 +248,22 @@ terraform-destroy:
 	@test -n "$$YC_TOKEN" || { echo "Set YC_TOKEN with: export YC_TOKEN=\"$$(yc iam create-token)\""; exit 1; }
 	$(TERRAFORM) -chdir=$(TERRAFORM_DIR) destroy -var-file="$(TF_VAR_FILE)"
 
-k8s-secret:
-	$(KUBECTL) apply --filename $(K8S_DIR)/namespace.yaml
-	KUBECTL="$(KUBECTL)" K8S_NAMESPACE="$(K8S_NAMESPACE)" \
-		K8S_SECRET_NAME="$(K8S_SECRET_NAME)" \
-		$(K8S_DIR)/sync-secret.sh
+k8s-secret: external-secrets-status
+	@echo "The application Secret is managed automatically by External Secrets Operator."
 
 helm-setup:
 	@command -v $(HELM) >/dev/null 2>&1 || { echo "Install Helm from https://helm.sh/docs/intro/install/"; exit 1; }
 	$(HELM) version
-	@echo "No additional chart repository is required by bulletin-board; production uses Service LoadBalancer and Lockbox sync."
+	@echo "External Secrets chart: $(EXTERNAL_SECRETS_CHART):$(EXTERNAL_SECRETS_CHART_VERSION)"
+	@echo "Reloader chart: stakater/reloader:$(RELOADER_CHART_VERSION)"
 
 helm-lint:
 	@test -f "$(HELM_CHART_DIR)/values.yaml" || { echo "Missing Helm chart: $(HELM_CHART_DIR)"; exit 1; }
 	$(HELM) lint --strict $(HELM_CHART_DIR)
 	$(HELM) lint --strict $(HELM_CHART_DIR) --values $(HELM_CHART_DIR)/values-dev.yaml
-	$(HELM) lint --strict $(HELM_CHART_DIR) --values $(HELM_CHART_DIR)/values-prod.yaml
+	$(HELM) lint --strict $(HELM_CHART_DIR) \
+		--values $(HELM_CHART_DIR)/values-prod.yaml \
+		--set-string externalSecret.remoteSecretId=render-only-placeholder
 
 helm-check: helm-lint
 	$(HELM) template $(HELM_RELEASE) $(HELM_CHART_DIR) \
@@ -255,7 +271,8 @@ helm-check: helm-lint
 		--values $(HELM_CHART_DIR)/values-dev.yaml >/dev/null
 	$(HELM) template $(HELM_RELEASE) $(HELM_CHART_DIR) \
 		--namespace $(K8S_NAMESPACE) \
-		--values $(HELM_CHART_DIR)/values-prod.yaml >/dev/null
+		--values $(HELM_CHART_DIR)/values-prod.yaml \
+		--set-string externalSecret.remoteSecretId=render-only-placeholder >/dev/null
 
 helm-template: helm-lint
 	@test -f "$(HELM_VALUES_FILE)" || { echo "Missing values file: $(HELM_VALUES_FILE)"; exit 1; }
@@ -263,19 +280,61 @@ helm-template: helm-lint
 		--namespace $(K8S_NAMESPACE) \
 		--values $(HELM_VALUES_FILE) \
 		--set-string image.repository="$(K8S_IMAGE_REPOSITORY)" \
-		--set-string image.tag="$(K8S_IMAGE_TAG)"
+		--set-string image.tag="$(K8S_IMAGE_TAG)" \
+		--set-string externalSecret.remoteSecretId="$(if $(LOCKBOX_SECRET_ID),$(LOCKBOX_SECRET_ID),render-only-placeholder)"
 
-helm-adopt: k8s-secret
+helm-adopt:
+	$(KUBECTL) apply --filename $(K8S_DIR)/namespace.yaml
 	KUBECTL="$(KUBECTL)" K8S_NAMESPACE="$(K8S_NAMESPACE)" \
 		HELM_RELEASE="$(HELM_RELEASE)" bash $(HELM_ADOPT_SCRIPT)
 
-helm-deploy: helm-check helm-adopt
+external-secrets-install:
+	KUBECTL="$(KUBECTL)" HELM="$(HELM)" \
+		K8S_NAMESPACE="$(K8S_NAMESPACE)" \
+		EXTERNAL_SECRETS_NAMESPACE="$(EXTERNAL_SECRETS_NAMESPACE)" \
+		EXTERNAL_SECRETS_RELEASE="$(EXTERNAL_SECRETS_RELEASE)" \
+		EXTERNAL_SECRETS_CHART="$(EXTERNAL_SECRETS_CHART)" \
+		EXTERNAL_SECRETS_CHART_VERSION="$(EXTERNAL_SECRETS_CHART_VERSION)" \
+		EXTERNAL_SECRETS_VALUES="$(EXTERNAL_SECRETS_DIR)/external-secrets-values.yaml" \
+		EXTERNAL_SECRETS_SERVICE_ACCOUNT_NAME="$(EXTERNAL_SECRETS_SERVICE_ACCOUNT_NAME)" \
+		EXTERNAL_SECRETS_STORE_MANIFEST="$(EXTERNAL_SECRETS_DIR)/cluster-secret-store.yaml" \
+		EXTERNAL_SECRETS_STORE_NAME="$(EXTERNAL_SECRETS_STORE_NAME)" \
+		EXTERNAL_SECRETS_WAIT_TIMEOUT="$(EXTERNAL_SECRETS_WAIT_TIMEOUT)" \
+		RELOADER_NAMESPACE="$(RELOADER_NAMESPACE)" \
+		RELOADER_RELEASE="$(RELOADER_RELEASE)" \
+		RELOADER_CHART_VERSION="$(RELOADER_CHART_VERSION)" \
+		RELOADER_VALUES="$(EXTERNAL_SECRETS_DIR)/reloader-values.yaml" \
+		bash $(EXTERNAL_SECRETS_DIR)/install.sh
+
+external-secrets-auth-rotate:
+	KUBECTL="$(KUBECTL)" HELM="$(HELM)" \
+		K8S_NAMESPACE="$(K8S_NAMESPACE)" \
+		EXTERNAL_SECRETS_NAMESPACE="$(EXTERNAL_SECRETS_NAMESPACE)" \
+		EXTERNAL_SECRETS_RELEASE="$(EXTERNAL_SECRETS_RELEASE)" \
+		EXTERNAL_SECRETS_CHART="$(EXTERNAL_SECRETS_CHART)" \
+		EXTERNAL_SECRETS_CHART_VERSION="$(EXTERNAL_SECRETS_CHART_VERSION)" \
+		EXTERNAL_SECRETS_VALUES="$(EXTERNAL_SECRETS_DIR)/external-secrets-values.yaml" \
+		EXTERNAL_SECRETS_SERVICE_ACCOUNT_NAME="$(EXTERNAL_SECRETS_SERVICE_ACCOUNT_NAME)" \
+		EXTERNAL_SECRETS_STORE_MANIFEST="$(EXTERNAL_SECRETS_DIR)/cluster-secret-store.yaml" \
+		EXTERNAL_SECRETS_STORE_NAME="$(EXTERNAL_SECRETS_STORE_NAME)" \
+		EXTERNAL_SECRETS_WAIT_TIMEOUT="$(EXTERNAL_SECRETS_WAIT_TIMEOUT)" \
+		EXTERNAL_SECRETS_ROTATE_AUTH_KEY=true \
+		RELOADER_NAMESPACE="$(RELOADER_NAMESPACE)" \
+		RELOADER_RELEASE="$(RELOADER_RELEASE)" \
+		RELOADER_CHART_VERSION="$(RELOADER_CHART_VERSION)" \
+		RELOADER_VALUES="$(EXTERNAL_SECRETS_DIR)/reloader-values.yaml" \
+		bash $(EXTERNAL_SECRETS_DIR)/install.sh
+
+helm-deploy: helm-check external-secrets-install helm-adopt
 	@test -f "$(HELM_VALUES_FILE)" || { echo "Missing values file: $(HELM_VALUES_FILE)"; exit 1; }
 	@set -eu; \
-		secret_revision="$$( \
-			$(KUBECTL) --namespace $(K8S_NAMESPACE) get \
-				secret/$(K8S_SECRET_NAME) --output jsonpath='{.metadata.resourceVersion}' \
-		)"; \
+		lockbox_secret_id="$(LOCKBOX_SECRET_ID)"; \
+		if [ -z "$$lockbox_secret_id" ]; then \
+			lockbox_secret_id="$$( \
+				yc lockbox secret get --name "$(K8S_LOCKBOX_SECRET_NAME)" --format json \
+					| jq -er '.id' \
+			)"; \
+		fi; \
 		$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
 			--namespace $(K8S_NAMESPACE) \
 			--create-namespace \
@@ -283,10 +342,13 @@ helm-deploy: helm-check helm-adopt
 			--set-string image.repository="$(K8S_IMAGE_REPOSITORY)" \
 			--set-string image.tag="$(K8S_IMAGE_TAG)" \
 			--set-string secret.existingSecret="$(K8S_SECRET_NAME)" \
-			--set-string secret.revision="$$secret_revision" \
+			--set-string externalSecret.remoteSecretId="$$lockbox_secret_id" \
 			--wait \
 			--timeout $(HELM_TIMEOUT) \
 			--history-max $(HELM_HISTORY_MAX)
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) wait \
+		--for=condition=Ready externalsecret/$(EXTERNAL_SECRET_NAME) \
+		--timeout=$(EXTERNAL_SECRETS_WAIT_TIMEOUT)
 	$(KUBECTL) --namespace $(K8S_NAMESPACE) rollout status \
 		deployment/$(K8S_DEPLOYMENT) --timeout=$(K8S_ROLLOUT_TIMEOUT)
 
@@ -308,6 +370,24 @@ helm-rollback:
 		--timeout $(HELM_TIMEOUT)
 	$(KUBECTL) --namespace $(K8S_NAMESPACE) rollout status \
 		deployment/$(K8S_DEPLOYMENT) --timeout=$(K8S_ROLLOUT_TIMEOUT)
+
+external-secrets-status:
+	$(KUBECTL) --namespace $(EXTERNAL_SECRETS_NAMESPACE) get deployment,pods --output wide
+	$(KUBECTL) --namespace $(EXTERNAL_SECRETS_NAMESPACE) get secret/sa-creds
+	$(KUBECTL) get clustersecretstore/$(EXTERNAL_SECRETS_STORE_NAME)
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) get externalsecret/$(EXTERNAL_SECRET_NAME)
+	$(KUBECTL) --namespace $(K8S_NAMESPACE) get secret/$(K8S_SECRET_NAME)
+	$(KUBECTL) --namespace $(RELOADER_NAMESPACE) get deployment,pods --output wide
+
+external-secrets-rotation-check:
+	KUBECTL="$(KUBECTL)" K8S_NAMESPACE="$(K8S_NAMESPACE)" \
+		K8S_DEPLOYMENT="$(K8S_DEPLOYMENT)" \
+		K8S_PUBLIC_SERVICE="$(K8S_PUBLIC_SERVICE)" \
+		K8S_SECRET_NAME="$(K8S_SECRET_NAME)" \
+		K8S_LOCKBOX_SECRET_NAME="$(K8S_LOCKBOX_SECRET_NAME)" \
+		K8S_LOCKBOX_SECRET_ID="$(LOCKBOX_SECRET_ID)" \
+		EXTERNAL_SECRET_NAME="$(EXTERNAL_SECRET_NAME)" \
+		bash $(EXTERNAL_SECRETS_DIR)/rotation-check.sh
 
 k8s-status:
 	$(KUBECTL) get nodes --output wide

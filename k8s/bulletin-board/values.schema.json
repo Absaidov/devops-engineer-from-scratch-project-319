@@ -7,6 +7,7 @@
     "image",
     "config",
     "secret",
+    "externalSecret",
     "service",
     "publicService",
     "ingress"
@@ -44,7 +45,7 @@
     },
     "secret": {
       "type": "object",
-      "required": ["existingSecret", "create", "stringData"],
+      "required": ["existingSecret", "create", "autoReload", "stringData"],
       "properties": {
         "existingSecret": {
           "type": "string",
@@ -53,13 +54,61 @@
         "create": {
           "type": "boolean"
         },
-        "revision": {
-          "type": "string"
+        "autoReload": {
+          "type": "boolean"
         },
         "stringData": {
           "type": "object",
           "additionalProperties": {
             "type": "string"
+          }
+        }
+      }
+    },
+    "externalSecret": {
+      "type": "object",
+      "required": ["enabled", "refreshPolicy", "refreshInterval", "remoteSecretId", "secretStoreRef", "target"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "refreshPolicy": {
+          "type": "string",
+          "enum": ["Periodic", "OnChange", "CreatedOnce"]
+        },
+        "refreshInterval": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(s|m|h)$"
+        },
+        "remoteSecretId": {
+          "type": "string"
+        },
+        "secretStoreRef": {
+          "type": "object",
+          "required": ["name", "kind"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "type": "string",
+              "enum": ["SecretStore", "ClusterSecretStore"]
+            }
+          }
+        },
+        "target": {
+          "type": "object",
+          "required": ["creationPolicy", "deletionPolicy"],
+          "properties": {
+            "creationPolicy": {
+              "type": "string",
+              "enum": ["Owner", "Orphan", "Merge", "None"]
+            },
+            "deletionPolicy": {
+              "type": "string",
+              "enum": ["Delete", "Merge", "Retain"]
+            }
           }
         }
       }
@@ -170,4 +219,3 @@
     }
   }
 }
-
