@@ -2,6 +2,8 @@
 
 [![hexlet-check](https://github.com/Absaidov/devops-engineer-from-scratch-project-319/actions/workflows/hexlet-check.yml/badge.svg)](https://github.com/Absaidov/devops-engineer-from-scratch-project-319/actions)
 
+Развёрнутое приложение: [http://158.160.176.107](http://158.160.176.107)
+
 Учебная инфраструктура для приложения «Доска объявлений». Исходное приложение и его Docker-образ находятся в отдельном [форке приложения](https://github.com/Absaidov/project-devops-deploy).
 
 На текущем этапе Terraform создаёт в Yandex Cloud:
@@ -35,6 +37,7 @@ Terraform-конфигурация находится в каталоге [`terr
 - Yandex Cloud CLI (`yc`);
 - `kubectl` для проверки кластера;
 - Helm `>= 3.8.0` для установки Prometheus Operator и External Secrets Operator;
+- доступ к Yandex Container Registry: worker-узлы получают роль `container-registry.images.puller` через Terraform, а для публикации новых образов используется `yc container registry configure-docker`;
 - активный платёжный аккаунт Yandex Cloud;
 - права администратора каталога на время учебного развёртывания, поскольку Terraform создаёт сервисные аккаунты и назначает им роли.
 
